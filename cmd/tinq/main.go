@@ -42,6 +42,7 @@ import (
 	"github.com/coglative/talos-in-qemu/cluster"
 	"github.com/coglative/talos-in-qemu/driverkit"
 	"github.com/coglative/talos-in-qemu/platform"
+	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -65,64 +66,134 @@ type hvf struct {
 }
 
 func main() {
+	// driverkit reads --kubeconfig off the STDLIB flagset (flag.Lookup), so it
+	// must still be registered there. AddGoFlagSet below adopts it into cobra,
+	// which means one flag object serves both: cobra parses it, driverkit reads
+	// it. Changing driverkit's signature for a CLI refactor would ripple into
+	// every other provider built on the same contract.
 	driverkit.Kubeconfig()
-	stateRoot := flag.String("state-root", filepath.Join(os.Getenv("HOME"), ".hvf"), "per-machine state root")
-	imageRoot := flag.String("image-root", filepath.Join(os.Getenv("HOME"), ".hvf", "images"), "root for resolving non-absolute spec.image profile names")
-	interval := flag.Duration("interval", 5*time.Second, "reconcile interval")
-	apply := flag.String("apply", "", "BOOTSTRAP: reconcile ONE TalosMachine read from this YAML file, with no control plane, then exit")
-	destroyF := flag.String("destroy", "", "BOOTSTRAP: destroy the TalosMachine described by this YAML file, then exit")
-	up := flag.String("up", "", "BOOTSTRAP: -apply, then bring the machine up to a single-node Kubernetes cluster, then exit")
-	flag.Parse()
-
-	if err := os.MkdirAll(*stateRoot, 0o755); err != nil {
-		log.Fatalf("state root: %v", err)
+	// SilenceErrors keeps cobra from printing the error itself; we print it
+	// ONCE here. Without this the pair (SilenceErrors, SilenceUsage) makes a bad
+	// invocation exit 1 with NO output at all, which is worse than the flags it
+	// replaced.
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "tinq: %v\n", err)
+		os.Exit(1)
 	}
-	d := &hvf{stateRoot: *stateRoot, imageRoot: *imageRoot, detect: sync.OnceValues(platform.Detect)}
+}
 
-	// BOOTSTRAP MODE — the chicken-and-egg door.
-	//
-	// This provider reconciles TalosMachine CRs, so it needs a control plane to
-	// read them from. On a laptop with no cluster yet, that is circular: the
-	// cluster is the thing we are trying to create. The escape used to be a
-	// kind cluster, which drags in a container runtime purely to bootstrap a
-	// hypervisor that does not need one.
-	//
-	// So: read ONE CR from a file and run it through the SAME Driver the
-	// controller loop uses. Not a second way to make a VM — the identical
-	// Observe/Create/Destroy, identical qemu invocation, identical SCC and
-	// state layout. The only thing bypassed is where the CR came from.
-	// Anything else would be two truths about how a machine gets built, and
-	// they would drift.
-	//
-	// Once the first node is up and bootstrapped it becomes the management
-	// cluster, and this same binary runs against it in controller mode for
-	// every machine after.
-	//
-	// -up is -apply plus the cluster. It is the SAME create() and the same
-	// state layout — the VM half is byte-for-byte what -apply builds — with
-	// cluster.Up driving the Talos side afterwards. -apply stays VM-only, and
-	// -destroy stays working with no hypervisor and no reachable node.
-	if *apply != "" || *destroyF != "" || *up != "" {
-		path, verb := *apply, "apply"
-		switch {
-		case *destroyF != "":
-			path, verb = *destroyF, "destroy"
-		case *up != "":
-			path, verb = *up, "up"
-		}
-		if err := standalone(context.Background(), d, path, verb); err != nil {
-			log.Fatalf("%s %s: %v", verb, path, err)
-		}
-		return
+// newRootCmd builds the CLI.
+//
+// VERBS, NOT FLAGS. This was `-apply <file>` / `-destroy <file>` / `-up <file>`
+// — three string flags that were really a mode selector, so nothing stopped you
+// passing two at once and the help text could not say which combinations meant
+// anything. As subcommands the shape is checked by the parser, each verb owns
+// its own flags and args, and `tinq up --help` documents one thing.
+//
+// It also matches the neighbourhood: talosctl, kubectl and the crossplane CLI
+// are all cobra, so `tinq up machine.yaml` reads native to anyone who would use
+// this.
+func newRootCmd() *cobra.Command {
+	var stateRoot, imageRoot string
+	var interval time.Duration
+
+	root := &cobra.Command{
+		Use:   "tinq",
+		Short: "Talos Kubernetes nodes as real VMs, driven by a TalosMachine resource",
+		Long: "tinq reconciles TalosMachine resources into QEMU virtual machines.\n\n" +
+			"Run it with a verb to act on ONE machine read from a file (no control\n" +
+			"plane needed), or `tinq controller` to watch resources in a cluster.",
+		SilenceUsage:  true, // a runtime failure is not a usage error
+		SilenceErrors: true, // we print it ourselves, once
 	}
 
-	log.Fatal(driverkit.Run(context.Background(), driverkit.Config{
-		GVR: schema.GroupVersionResource{
-			Group: "machine.hvf.fleet.io", Version: "v1alpha1", Resource: "talosmachines",
+	root.PersistentFlags().StringVar(&stateRoot, "state-root",
+		filepath.Join(os.Getenv("HOME"), ".hvf"), "per-machine state root")
+	root.PersistentFlags().StringVar(&imageRoot, "image-root",
+		filepath.Join(os.Getenv("HOME"), ".hvf", "images"),
+		"root for resolving non-absolute spec.image profile names")
+	// Adopt driverkit's stdlib flags (--kubeconfig). See main().
+	root.PersistentFlags().AddGoFlagSet(flag.CommandLine)
+
+	newDriver := func() (*hvf, error) {
+		if err := os.MkdirAll(stateRoot, 0o755); err != nil {
+			return nil, fmt.Errorf("state root: %w", err)
+		}
+		return &hvf{stateRoot: stateRoot, imageRoot: imageRoot,
+			detect: sync.OnceValues(platform.Detect)}, nil
+	}
+
+	// The three standalone verbs are the SAME code path with a different word:
+	// standalone() decides, and it runs the identical Observe/Create/Destroy the
+	// controller loop uses. Two ways to build a machine would drift.
+	runVerb := func(verb string) func(*cobra.Command, []string) error {
+		return func(cmd *cobra.Command, args []string) error {
+			d, err := newDriver()
+			if err != nil {
+				return err
+			}
+			return standalone(cmd.Context(), d, args[0], verb)
+		}
+	}
+
+	apply := &cobra.Command{
+		Use:   "apply <machine.yaml>",
+		Short: "Create the VM described by one TalosMachine, then exit",
+		Long: "Reconcile ONE TalosMachine read from a file, with no control plane.\n\n" +
+			"This exists because of a chicken-and-egg: a controller needs a control\n" +
+			"plane to read resources from, and on a fresh laptop the control plane is\n" +
+			"the thing you are creating. Re-running is safe — if the VM is already\n" +
+			"running this reports it and does nothing.",
+		Args: cobra.ExactArgs(1),
+		RunE: runVerb("apply"),
+	}
+
+	destroy := &cobra.Command{
+		Use:   "destroy <machine.yaml>",
+		Short: "Destroy the VM and its whole state directory, then exit",
+		Long: "Takes the entire SCC: the qemu process and everything in the state\n" +
+			"directory. Idempotent — already-gone is success. Works with no usable\n" +
+			"accelerator and no reachable node: teardown must not require a live\n" +
+			"hypervisor.",
+		Args: cobra.ExactArgs(1),
+		RunE: runVerb("destroy"),
+	}
+
+	up := &cobra.Command{
+		Use:   "up <machine.yaml>",
+		Short: "Create the VM AND bring it up to a single-node Kubernetes cluster",
+		Long: "apply, plus the Talos side: machine config, install, bootstrap,\n" +
+			"kubeconfig, and storage — one command from a TalosMachine to a Ready\n" +
+			"node.\n\nThe VM half is byte-for-byte what `apply` builds; this adds the\n" +
+			"cluster on top.",
+		Args: cobra.ExactArgs(1),
+		RunE: runVerb("up"),
+	}
+
+	controller := &cobra.Command{
+		Use:   "controller",
+		Short: "Watch TalosMachine resources in a cluster and reconcile them",
+		Long: "The steady-state mode. Once the first node is bootstrapped it can host\n" +
+			"the CRD and this binary, and every machine after arrives the normal way.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := newDriver()
+			if err != nil {
+				return err
+			}
+			return driverkit.Run(cmd.Context(), driverkit.Config{
+				GVR: schema.GroupVersionResource{
+					Group: "machine.hvf.fleet.io", Version: "v1alpha1", Resource: "talosmachines",
+				},
+				Finalizer: "machine.hvf.fleet.io/vm",
+				Interval:  interval,
+			}, d)
 		},
-		Finalizer: "machine.hvf.fleet.io/vm",
-		Interval:  *interval,
-	}, d))
+	}
+	controller.Flags().DurationVar(&interval, "interval", 5*time.Second, "reconcile interval")
+
+	root.AddCommand(apply, destroy, up, controller)
+	return root
 }
 
 // standalone runs one CR through the Driver with no control plane. It is

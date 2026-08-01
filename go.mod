@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/cosi-project/runtime v1.14.1
 	github.com/siderolabs/talos/pkg/machinery v1.13.7
+	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v4 v4.0.0-rc.4
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
@@ -40,6 +41,7 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/jsimonetti/rtnetlink/v2 v2.2.1-0.20260317095713-310581b9c6ac // indirect
 	github.com/json-iterator/go v1.1.12 // indirect

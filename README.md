@@ -5,7 +5,7 @@ Kubernetes custom resource. No Docker. No root. No nested virtualization.
 Linux/KVM and macOS/Hypervisor.framework, on x86_64 and arm64.
 
 ```
-tinq -up examples/bootstrap-machine.yaml
+tinq up examples/bootstrap-machine.yaml
 ```
 
 Boots a [Talos Linux](https://www.talos.dev) control-plane VM on the host's
@@ -14,7 +14,7 @@ drives it all the way to a single-node Kubernetes cluster with a working
 StorageClass. Measured on Linux/KVM over two runs: **3.5–4 minutes** cold to a
 `Ready` node with storage, of which ~20 seconds is boot to the Talos API.
 
-No `talosctl`, no `kubectl`, no `helm`, no container runtime. `-apply` still
+No `talosctl`, no `kubectl`, no `helm`, no container runtime. `apply` still
 exists and still stops at a booted VM in maintenance mode, with the Talos API
 forwarded to `127.0.0.1:50000`. Cold boot to "machine is reachable" measured at
 ~20 seconds on Linux/KVM with a v1.13.7 ISO — and at **~10 seconds** on an M5
@@ -89,7 +89,7 @@ Then, on either platform:
 go install github.com/coglative/talos-in-qemu/cmd/tinq@latest
 ```
 
-`-up` needs nothing else: the Talos API client and config generator are linked
+`up` needs nothing else: the Talos API client and config generator are linked
 in, and the storage manifest is embedded. `talosctl` is optional and only needed
 for the by-hand sequence below, or for poking at a running node:
 
@@ -119,10 +119,10 @@ looks like a hang — GRUB comes up (the Talos ISOs ship both `bootx64.efi` and
 `bootaa64.efi`), fails to load a kernel it cannot execute, and you get no console
 and no API.
 
-**Keep the version in the filename.** `-up` reads the Talos version out of the
+**Keep the version in the filename.** `up` reads the Talos version out of the
 ISO's volume id and pins `installer:` to it; that pin is not optional (see the
 manual sequence below for what it prevents), and the filename is what tells
-*you* which release you are on. `-up` also refuses outright when the ISO is
+*you* which release you are on. `up` also refuses outright when the ISO is
 newer than the config generator compiled into the binary — Talos config
 generation is backwards compatible only, and exceeding it does not fail loudly,
 it emits a plausible config for a Talos that does not exist.
@@ -156,42 +156,42 @@ built before the field existed. Set it and you get a second
 virtio disk with serial `talos-data`, a Talos *user volume* on it, and a
 StorageClass provisioning into that volume — one field decides both halves, so
 they cannot disagree. **Mind the unit**: `dataDisk: 40` is not a size, decodes
-as a number and reads as unset. `-up` announces the resulting skip rather than
+as a number and reads as unset. `up` announces the resulting skip rather than
 letting the first sign of it be a `Pending` PVC an hour later.
 
-Both `hostForwards` entries are load-bearing for `-up`: 50000 is where it
+Both `hostForwards` entries are load-bearing for `up`: 50000 is where it
 applies config and bootstraps etcd, and 6443 is written into both the generated
 machine config's control-plane endpoint and the kubeconfig, so it has to be an
-address *the host* can reach. `-up` refuses up front when either is missing
+address *the host* can reach. `up` refuses up front when either is missing
 rather than spending a wait's whole budget on an address that was never there.
 
 Three ways to reconcile it:
 
 ```sh
 # BOOTSTRAP: one machine from a file, no control plane needed
-tinq -apply   machine.yaml    # a booted VM in maintenance mode, nothing more
-tinq -up      machine.yaml    # -apply, then all the way to a Kubernetes cluster
-tinq -destroy machine.yaml
+tinq apply   machine.yaml    # a booted VM in maintenance mode, nothing more
+tinq up      machine.yaml    # apply, then all the way to a Kubernetes cluster
+tinq destroy machine.yaml
 
 # CONTROLLER: watch TalosMachine resources in a cluster
 kubectl apply -f crd/talosmachine.yaml
-tinq --kubeconfig ~/.kube/config
+tinq controller --kubeconfig ~/.kube/config
 ```
 
-`-apply` exists because of a chicken-and-egg: a controller needs a control plane
+`apply` exists because of a chicken-and-egg: a controller needs a control plane
 to read resources from, and on a fresh laptop the control plane is the thing you
 are trying to create. The usual escape is a `kind` cluster — dragging in a
 container runtime purely to bootstrap a hypervisor that doesn't need one. So
-`-apply` reads one resource from disk and runs it through the **same driver** the
+`apply` reads one resource from disk and runs it through the **same driver** the
 controller loop uses: identical `Observe`/`Create`/`Destroy`, identical QEMU
 invocation, identical state layout. Only the source of the resource differs.
 Anything else would be two ways to build a machine, and they would drift.
 
-`-up` is `-apply` plus the cluster, and the VM half is byte-for-byte what
-`-apply` builds — the same `create()`, the same QEMU invocation, the same state
+`up` is `apply` plus the cluster, and the VM half is byte-for-byte what
+`apply` builds — the same `create()`, the same QEMU invocation, the same state
 layout — with the Talos side driven afterwards. A VM already sitting in
-maintenance mode is *adopted*, not duplicated, so `-apply` then `-up` works.
-`-destroy` keeps working with no hypervisor and no reachable node.
+maintenance mode is *adopted*, not duplicated, so `apply` then `up` works.
+`destroy` keeps working with no hypervisor and no reachable node.
 
 Once the first node is bootstrapped it can host the CRD and TinQ itself, and
 every machine after that arrives the normal way.
@@ -199,7 +199,7 @@ every machine after that arrives the normal way.
 ## One command to a cluster
 
 ```sh
-tinq -up machine.yaml
+tinq up machine.yaml
 ```
 
 Ten steps, and **the transcript is the feature**. Four of them are not obvious,
@@ -248,7 +248,7 @@ cold to a `Ready` node with a bound PVC — the announced waits above sum to
 maintenance ~5s, install ~25s, Talos API ~20s after reboot, node registered
 ~70s, `Ready` ~30s later — roughly 3 minutes.
 
-Four artifacts land in the machine's state directory, at `0600`, so `-destroy`
+Four artifacts land in the machine's state directory, at `0600`, so `destroy`
 sweeps them with everything else and the secrets do not outlive the cluster:
 
 ```sh
@@ -257,11 +257,11 @@ export KUBECONFIG=~/.hvf/<site>/<uid>/kubeconfig
 kubectl get nodes
 ```
 
-`-up` is **bootstrap only**. It creates a cluster; it never upgrades, scales or
+`up` is **bootstrap only**. It creates a cluster; it never upgrades, scales or
 reconciles one. It is also **not resumable** — a failure part way through leaves
-a running VM and a state dir, and re-running `-up` waits out the maintenance
+a running VM and a state dir, and re-running `up` waits out the maintenance
 timeout against a node that has already left maintenance mode. Recovery is
-`-destroy` and try again, which is what the error tells you.
+`destroy` and try again, which is what the error tells you.
 
 Three probes that look right and are not, and all three shape the code above: a
 TCP connect to a forwarded port succeeds even when nothing listens in the guest
@@ -272,12 +272,12 @@ reach `running` until etcd exists, and `bootstrap` is what creates etcd.
 
 ### Doing it by hand
 
-`-up` is not magic and nothing above is hidden from you. This is the same
+`up` is not magic and nothing above is hidden from you. This is the same
 sequence with `talosctl`, and every flag in it is load-bearing — each one
 corresponds to a way it fails:
 
 ```sh
-tinq -apply machine.yaml          # to Talos maintenance mode
+tinq apply machine.yaml          # to Talos maintenance mode
 
 cat > patch.yaml <<'YAML'
 machine:
@@ -304,7 +304,7 @@ machine:
     # THE CONSOLE NAME IS ARCHITECTURE-SPECIFIC: ttyAMA0 is the arm64 PL011
     # (Apple silicon, arm64 Linux); on x86_64 the serial port is ttyS0. Use the
     # wrong one and you get a booting-but-mute node. No need to guess — `tinq
-    # -apply` prints the correct value for THIS host right after it creates the
+    # apply` prints the correct value for THIS host right after it creates the
     # VM; copy that line.
     extraKernelArgs:
       - console=ttyAMA0     # arm64;  x86_64: console=ttyS0
@@ -326,7 +326,7 @@ talosctl -n 127.0.0.1 -e 127.0.0.1 kubeconfig ./kubeconfig --force
 KUBECONFIG=$PWD/kubeconfig kubectl get nodes -w
 ```
 
-By hand you also get no StorageClass and no user volume: `-up`'s step 10 and the
+By hand you also get no StorageClass and no user volume: `up`'s step 10 and the
 `userVolume` half of step 6 are both things this patch does not do. Use
 `talosctl get machinestatus` for liveness — not `talosctl version`.
 
@@ -361,13 +361,13 @@ at `t=0.000000` and maintenance is reachable in **18–20s** every time, against
 39s / ~210s / never / never / never without it. Whole bring-ups went from 284s
 and 480s (the two that finished at all) to 192–258s across four. TinQ passes the
 device, so this is only yours to add if you are driving qemu directly rather than
-through `tinq -apply`.
+through `tinq apply`.
 
 So the two mute-console cases are told apart by the API, not by the log: mute
 console with a live API is the x86_64 cmdline above; mute console with a dead API,
 frozen at `/sbin/init`, is entropy.
 
-And one on **macOS/arm64**, which `-up` handles and a hand-rolled config does
+And one on **macOS/arm64**, which `up` handles and a hand-rolled config does
 not: add
 
 ```yaml
@@ -385,7 +385,7 @@ does; see [docs/kexec-on-arm64-macos.md](docs/kexec-on-arm64-macos.md).
 
 ### If you plan to run workloads
 
-Talos is not kind, and three defaults differ. `-up` decides all three
+Talos is not kind, and three defaults differ. `up` decides all three
 deliberately, and prints the decision at the end of a bring-up rather than
 leaving you to find out:
 
@@ -404,7 +404,7 @@ leaving you to find out:
   kubectl label namespace <ns> pod-security.kubernetes.io/enforce=privileged
   ```
 
-  `-up` does this for `local-path-storage` and nothing else, because
+  `up` does this for `local-path-storage` and nothing else, because
   local-path's helper pod uses `hostPath`. Your namespaces stay at `baseline`.
 
 - **Storage: INSTALLED**, when `spec.dataDisk` is set.
@@ -419,11 +419,11 @@ leaving you to find out:
   filling `EPHEMERAL`; and the binding mode is `WaitForFirstConsumer`, so a PVC
   with no pod stays `Pending` by design until something schedules against it.
 
-  No `spec.dataDisk` means no user volume and no StorageClass. `-up` announces
+  No `spec.dataDisk` means no user volume and no StorageClass. `up` announces
   that skip rather than staying silent about it.
 
-**PVC data does not survive `-destroy`.** It lives on `data.qcow2` inside the
-machine's state directory, and `-destroy` takes the whole state directory. This
+**PVC data does not survive `destroy`.** It lives on `data.qcow2` inside the
+machine's state directory, and `destroy` takes the whole state directory. This
 is a local development cluster, not a place to keep anything.
 
 ## Unprivileged by construction
@@ -469,8 +469,8 @@ is `driverkit`'s.
                     {controlplane.yaml,talosconfig,secrets.yaml,kubeconfig}   # -up
 ```
 
-The four `-up` artifacts are written **into the machine's directory**, never one
-level up, and at `0600`. That is what makes `-destroy` sweep them: a cluster's
+The four `up` artifacts are written **into the machine's directory**, never one
+level up, and at `0600`. That is what makes `destroy` sweep them: a cluster's
 private keys must not outlive the cluster, and anything written beside the state
 root would be residue the site-tag check cannot find.
 
@@ -486,7 +486,7 @@ idempotently.
 
 Working and exercised:
 
-- `-apply` / `-destroy`, including re-apply (`Observe` reports present, so it
+- `apply` / `destroy`, including re-apply (`Observe` reports present, so it
   will not start a second QEMU against the same state directory)
 - Talos boots on KVM (Linux/amd64, `q35` + `-cpu host` + distro OVMF); Talos
   API via `hostForwards`
@@ -499,14 +499,14 @@ Working and exercised:
 - **A real cluster, end to end** — *before this branch, by hand, on
   macOS/arm64*. Single-node control plane, Kubernetes v1.36.1 on Talos v1.9.5,
   kernel 6.12.18-talos arm64, containerd 2.0.3, node `Ready`, with Crossplane
-  and a real workload serving HTTP on it. ~3 minutes cold. This predates `-up`
+  and a real workload serving HTTP on it. ~3 minutes cold. This predates `up`
   and predates the platform abstraction; it is history, not a branch result.
 
-- **`-up`, end to end, on macOS/arm64.** Nine bring-ups on an Apple-silicon Mac
+- **`up`, end to end, on macOS/arm64.** Nine bring-ups on an Apple-silicon Mac
   (macOS 26.6, QEMU 11.0.2, HVF) with a v1.13.7 arm64 ISO, `cpu: 4` and
   `dataDisk: 40Gi`: node `Ready`, Kubernetes v1.36.2 on Talos v1.13.7, kernel
   6.18.39-talos arm64, containerd 2.2.6, `local-path` the default StorageClass,
-  all pods `Running`, `-destroy` leaving only `images` and no `qemu-system`
+  all pods `Running`, `destroy` leaving only `images` and no `qemu-system`
   process. **Two guest-side facts were checked rather than inferred**, because
   the transcript cannot show either: `kernel.kexec_load_disabled` reads `1` from
   `/proc/sys` inside the *installed* system, and `kexec_core: Starting new
@@ -516,7 +516,7 @@ Working and exercised:
   entropy failures described under "Doing it by hand", which is what
   `virtio-rng-pci` fixed. Reliability beyond 4/4 is not claimed.
 
-- **`-up`, end to end, on Linux/KVM.** Verified on real hardware with a
+- **`up`, end to end, on Linux/KVM.** Verified on real hardware with a
   v1.13.7 amd64 ISO and `dataDisk: 40Gi`: node `talos-jzb-cu0` `Ready`,
   Kubernetes v1.36.2 on Talos v1.13.7, kernel 6.18.39-talos, containerd 2.2.6,
   no taints; `local-path` the default StorageClass; a `ReadWriteOnce` PVC with
@@ -524,7 +524,7 @@ Working and exercised:
   mounting that PVC wrote a file to it and read it back, from
   `/dev/vdc1 … xfs … /data`. Talos confirms the OS installed to the disk with
   serial `talos-system` and the user volume `u-local-path-provisioner` on
-  `talos-data`. `-destroy` left `~/.hvf/` holding only `images`, no
+  `talos-data`. `destroy` left `~/.hvf/` holding only `images`, no
   `qemu-system` process and both ports free. 3.5–4 minutes cold over two runs.
   The second run is the transcript shown above, verbatim; it also bound a PVC
   through the pinned `busybox:1.38.0` helper pod, which wrote and read a file
@@ -532,16 +532,16 @@ Working and exercised:
 
 Not done yet — stated plainly rather than implied:
 
-- **`-up` is bootstrap only, and not resumable.** It creates a cluster; it
+- **`up` is bootstrap only, and not resumable.** It creates a cluster; it
   never upgrades, scales or reconciles one, and a failure part way through is
-  recovered with `-destroy` and a retry rather than by re-running `-up`.
+  recovered with `destroy` and a retry rather than by re-running `up`.
 - **One stderr line still interleaves with the transcript.** client-go relays
   the API server's `restricted:latest` PodSecurity *warning* during step 10,
   which reads like a failure and is not — the namespace is labelled
   `privileged` and the object is admitted. **The transcript above is a real,
-  unedited `-up` run**: that line is shown where it actually appears, with a
+  unedited `up` run**: that line is shown where it actually appears, with a
   two-line annotation under it and nothing removed. (The `extraKernelArgs` hint
-  used to interleave too; it now belongs to `-apply`, which is the only caller
+  used to interleave too; it now belongs to `apply`, which is the only caller
   that needs it, so it no longer prints during a bring-up.) Suppressing the
   client-go warning means installing a custom `WarningHandler`, which would
   also swallow warnings worth seeing; left visible for now.
@@ -561,13 +561,13 @@ Not done yet — stated plainly rather than implied:
   gap in the resource, not a platform limit.
 - **The two hosts differ in one behaviour, and it is guest-side.** Talos reboots
   through kexec after installing; under QEMU on macOS/arm64 that path dies in
-  the guest, so `-up` sets `kernel.kexec_load_disabled` there and only there.
+  the guest, so `up` sets `kernel.kexec_load_disabled` there and only there.
   Linux/KVM reboots through kexec normally. Both are verified end to end —
   see Status — but a hand-rolled machine config on macOS/arm64 that omits the
   sysctl will wedge roughly six times in ten; see
   [docs/kexec-on-arm64-macos.md](docs/kexec-on-arm64-macos.md).
 - **PVC data is disposable.** It lives on `data.qcow2` in the machine's state
-  directory and `-destroy` takes the whole directory. There is no snapshot, no
+  directory and `destroy` takes the whole directory. There is no snapshot, no
   export and no backup.
 - **Partial test coverage.** The `platform` package has unit tests — arch
   mapping, accelerator selection, firmware-registry scanning and image-arch
