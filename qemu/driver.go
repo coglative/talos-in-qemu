@@ -695,9 +695,16 @@ func (h *hvf) Observe(ctx context.Context, m *unstructured.Unstructured) (driver
 	// binary restarting, so a bridge established once at Create is gone while the VM still runs.
 	bridgeForwards(m)
 
-	return driverkit.Running, map[string]interface{}{
+	st := map[string]interface{}{
 		"pid": int64(pid), "stateDir": dir, "apiEndpoint": talosEndpoint(m),
-	}, nil
+	}
+
+	// Drive the machine to a cluster if it asked. Reached from here rather than from Create because
+	// bring-up needs the guest ALREADY RUNNING and answering apid, which is exactly what observing
+	// Running establishes; Create returns the moment qemu is launched.
+	maybeBootstrap(ctx, h, m, driverkit.Running, st)
+
+	return driverkit.Running, st, nil
 }
 
 func (h *hvf) Create(ctx context.Context, m *unstructured.Unstructured) error {

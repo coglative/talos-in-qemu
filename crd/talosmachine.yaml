@@ -106,6 +106,14 @@ spec:
                 image:
                   type: string
                   description: Path to the Talos boot image (ISO or raw disk) on the host.
+                bootstrap:
+                  type: boolean
+                  description: >-
+                    Drive this machine to a single-node cluster once it is running: machine
+                    config, install, bootstrap, kubeconfig. Opt-in, because a node someone
+                    else bootstraps is a legitimate shape and inferring it from the role
+                    would take that away silently. Ongoing reconciliation of the resulting
+                    cluster is provider-talos's, not this controller's.
                 cpu: { type: integer, minimum: 1 }
                 memory:
                   type: string
