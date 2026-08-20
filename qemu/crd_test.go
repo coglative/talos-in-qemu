@@ -1,4 +1,4 @@
-package main
+package qemu
 
 import (
 	"fmt"
@@ -14,7 +14,7 @@ import (
 // meaningful against the checked-out copy — there is no installed artifact to
 // point at, and resolving it any other way would let the test pass while the
 // file in the tree is broken.
-const crdPath = "../../crd/talosmachine.yaml"
+const crdPath = "../crd/talosmachine.yaml"
 
 // The CRD is DATA, so nothing in `go build` or `go test` had an opinion about
 // it: someone could drop a validation rule or rename a spec.baremetal field and

@@ -1,4 +1,4 @@
-package main
+package qemu
 
 import (
 	"context"
@@ -255,7 +255,7 @@ func TestAdoptIsRegisteredAndRefusesAVM(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	root := newRootCmd()
+	root := RootCmd()
 	root.SetArgs([]string{"adopt", "--state-root", t.TempDir(), path})
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)

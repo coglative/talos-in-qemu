@@ -23,7 +23,7 @@
 //
 // tier: compute uses QEMU user-mode networking, which requires NO ROOT. Root is
 // a vmnet requirement, so it arrives with tier fabric-sim, not before.
-package main
+package qemu
 
 import (
 	"context"
@@ -65,7 +65,10 @@ type hvf struct {
 	detect func() (*platform.Platform, error)
 }
 
-func main() {
+// Main is the CLI entrypoint, called by cmd/tinq. It is a function rather than `func main` so this
+// package can be IMPORTED: a package containing func main cannot be, and that -- not any design
+// decision -- is the only thing that kept this driver from being bound directly by a controller.
+func Main() {
 	// driverkit reads --kubeconfig off the STDLIB flagset (flag.Lookup), so it
 	// must still be registered there. AddGoFlagSet below adopts it into cobra,
 	// which means one flag object serves both: cobra parses it, driverkit reads
@@ -92,7 +95,7 @@ func main() {
 	// ONCE here. Without this the pair (SilenceErrors, SilenceUsage) makes a bad
 	// invocation exit 1 with NO output at all, which is worse than the flags it
 	// replaced.
-	if err := newRootCmd().Execute(); err != nil {
+	if err := RootCmd().Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "tinq: %v\n", err)
 		os.Exit(1)
 	}
@@ -109,7 +112,8 @@ func main() {
 // It also matches the neighbourhood: talosctl, kubectl and the crossplane CLI
 // are all cobra, so `tinq up machine.yaml` reads native to anyone who would use
 // this.
-func newRootCmd() *cobra.Command {
+// RootCmd is exported so an embedder can inspect or reuse the command tree.
+func RootCmd() *cobra.Command {
 	var stateRoot, imageRoot string
 	var interval time.Duration
 
