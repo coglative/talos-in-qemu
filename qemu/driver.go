@@ -412,7 +412,8 @@ const (
 // It is read in exactly TWO places — the qemu argument builder that BINDS the
 // forward, and hostForward below that DIALS it — and it is a constant so those
 // two can never drift apart. A dialled address that disagrees with the bound
-// one is not a wrong string, it is a five-minute timeout.
+// one is not a wrong string, it is a five-minute timeout. The dial side alone
+// passes through advertised, because a wildcard binds but cannot be dialled.
 const defaultHostAddr = "127.0.0.1"
 
 // hostForward reports the HOST address and port forwarded to guestPort, or
@@ -432,10 +433,24 @@ func hostForward(m *unstructured.Unstructured, guestPort int) (string, int) {
 	for _, hf := range nestedSlice(m, "spec", "hostForwards") {
 		h, _ := hf.(map[string]interface{})
 		if toInt(h["guestPort"]) == guestPort {
-			return str(h["hostAddr"], defaultHostAddr), toInt(h["hostPort"])
+			return advertised(str(h["hostAddr"], defaultHostAddr)), toInt(h["hostPort"])
 		}
 	}
 	return "", 0
+}
+
+// advertised turns a BIND address into one a client can DIAL.
+//
+// hostAddr answers "where does qemu listen", and 0.0.0.0 is correct for that. It does not answer
+// "where do I connect", and a wildcard reaches nothing when dialled -- so the generated kubeconfig
+// carried `server: https://0.0.0.0:33131` and kubectl failed against it with EOF.
+// See TestWildcardBindIsNotAdvertised.
+func advertised(bind string) string {
+	switch bind {
+	case "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	}
+	return bind
 }
 
 // talosEndpoint is the host side of the Talos API forward, host:port, or "".
@@ -1094,46 +1109,7 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 
 	// user-mode networking: unprivileged by construction. hostfwd is how the
 	// control plane reaches the Talos API without a bridge.
-	netdev := "user,id=n0" + guestIPv6()
-	for _, hf := range nestedSlice(m, "spec", "hostForwards") {
-		h, _ := hf.(map[string]interface{})
-		hp, gp := toInt(h["hostPort"]), toInt(h["guestPort"])
-		if hp <= 0 || gp <= 0 {
-			continue
-		}
-		// PROTOCOL IS PER-FORWARD, and defaults to tcp only.
-		//
-		// This emitted tcp unconditionally, which silently has no path for any
-		// UDP service — QUIC, WebTransport, DNS. The failure is nasty because
-		// the TCP half usually works: an HTTP/3 origin serves its page over h2
-		// and then the browser's WebTransport dial goes nowhere, which presents
-		// as a certificate rejection rather than a missing route.
-		//
-		// `both` is the common case for an HTTP/3 endpoint (h2 on TCP and H3 on
-		// UDP at the same port), so it is spelled once here rather than forcing
-		// two entries that must be kept in step.
-		// BIND ADDRESS is per-forward and defaults to loopback.
-		//
-		// Loopback is the safe default: on macOS it is what Local Network
-		// Privacy exempts, so a browser on the same machine reaches it without a
-		// permission prompt, and nothing is exposed to the network.
-		//
-		// But loopback is unreachable from ANOTHER DEVICE. A phone, a tablet, a
-		// second laptop on the same Wi-Fi cannot see it at all — which is the
-		// difference between "runs on my machine" and "runs in a demo". Set
-		// hostAddr to 0.0.0.0 (or a specific interface address) to publish it.
-		// That is a deliberate, per-port exposure decision, not a global switch.
-		addr := str(h["hostAddr"], defaultHostAddr)
-		switch strings.ToLower(str(h["protocol"], "tcp")) {
-		case "udp":
-			netdev += fmt.Sprintf(",hostfwd=udp:%s:%d-:%d", addr, hp, gp)
-		case "both", "tcp+udp":
-			netdev += fmt.Sprintf(",hostfwd=tcp:%s:%d-:%d", addr, hp, gp)
-			netdev += fmt.Sprintf(",hostfwd=udp:%s:%d-:%d", addr, hp, gp)
-		default:
-			netdev += fmt.Sprintf(",hostfwd=tcp:%s:%d-:%d", addr, hp, gp)
-		}
-	}
+	netdev := netdevArg(m)
 
 	args := []string{
 		"-machine", p.Machine + ",accel=" + p.Accel, "-cpu", p.CPU,
@@ -1513,4 +1489,54 @@ func configPatches(m *unstructured.Unstructured) ([]string, error) {
 	}
 
 	return out, nil
+}
+
+// netdevArg builds the qemu -netdev value: user-mode networking plus one hostfwd per forward.
+//
+// THIS IS THE BIND SIDE, and it reads hostAddr RAW -- a forward asking for 0.0.0.0 binds every
+// interface, which is the point. The DIAL side (hostForward) passes the same field through
+// advertised, because a wildcard binds but cannot be dialled. TestBindSideReadsHostAddrRaw
+// asserts the two stayed separate.
+func netdevArg(m *unstructured.Unstructured) string {
+	netdev := "user,id=n0" + guestIPv6()
+	for _, hf := range nestedSlice(m, "spec", "hostForwards") {
+		h, _ := hf.(map[string]interface{})
+		hp, gp := toInt(h["hostPort"]), toInt(h["guestPort"])
+		if hp <= 0 || gp <= 0 {
+			continue
+		}
+		// PROTOCOL IS PER-FORWARD, and defaults to tcp only.
+		//
+		// This emitted tcp unconditionally, which silently has no path for any
+		// UDP service — QUIC, WebTransport, DNS. The failure is nasty because
+		// the TCP half usually works: an HTTP/3 origin serves its page over h2
+		// and then the browser's WebTransport dial goes nowhere, which presents
+		// as a certificate rejection rather than a missing route.
+		//
+		// `both` is the common case for an HTTP/3 endpoint (h2 on TCP and H3 on
+		// UDP at the same port), so it is spelled once here rather than forcing
+		// two entries that must be kept in step.
+		// BIND ADDRESS is per-forward and defaults to loopback.
+		//
+		// Loopback is the safe default: on macOS it is what Local Network
+		// Privacy exempts, so a browser on the same machine reaches it without a
+		// permission prompt, and nothing is exposed to the network.
+		//
+		// But loopback is unreachable from ANOTHER DEVICE. A phone, a tablet, a
+		// second laptop on the same Wi-Fi cannot see it at all — which is the
+		// difference between "runs on my machine" and "runs in a demo". Set
+		// hostAddr to 0.0.0.0 (or a specific interface address) to publish it.
+		// That is a deliberate, per-port exposure decision, not a global switch.
+		addr := str(h["hostAddr"], defaultHostAddr)
+		switch strings.ToLower(str(h["protocol"], "tcp")) {
+		case "udp":
+			netdev += fmt.Sprintf(",hostfwd=udp:%s:%d-:%d", addr, hp, gp)
+		case "both", "tcp+udp":
+			netdev += fmt.Sprintf(",hostfwd=tcp:%s:%d-:%d", addr, hp, gp)
+			netdev += fmt.Sprintf(",hostfwd=udp:%s:%d-:%d", addr, hp, gp)
+		default:
+			netdev += fmt.Sprintf(",hostfwd=tcp:%s:%d-:%d", addr, hp, gp)
+		}
+	}
+	return netdev
 }

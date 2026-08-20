@@ -514,6 +514,12 @@ func Up(ctx context.Context, opts UpOptions) error {
 		return fail(err)
 	}
 
+	// The node hands back whatever endpoint its machine config carries, and a wildcard there is a
+	// bind address in a destination's slot -- see retargetKubeconfig. Applied to the ANSWER rather
+	// than only to the config we generate, because a node configured before this fix keeps
+	// answering with the old value.
+	kubeconfig = retargetKubeconfig(kubeconfig, kubeconfigHost(opts.KubeEndpoint))
+
 	if err := writeArtifacts(opts.StateDir, map[string][]byte{"kubeconfig": kubeconfig}); err != nil {
 		return fail(err)
 	}
