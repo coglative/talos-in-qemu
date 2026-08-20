@@ -1090,7 +1090,7 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 
 	// user-mode networking: unprivileged by construction. hostfwd is how the
 	// control plane reaches the Talos API without a bridge.
-	netdev := "user,id=n0"
+	netdev := "user,id=n0" + guestIPv6()
 	for _, hf := range nestedSlice(m, "spec", "hostForwards") {
 		h, _ := hf.(map[string]interface{})
 		hp, gp := toInt(h["hostPort"]), toInt(h["guestPort"])

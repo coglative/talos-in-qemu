@@ -123,3 +123,23 @@ func bridgeForwards(m *unstructured.Unstructured) {
 		}
 	}
 }
+
+// guestIPv6 gives the guest an IPv6 stack in addition to its IPv4 one.
+//
+// QEMU user-mode networking is IPv4-only by default, which is fatal on a host that reaches the
+// internet through NAT64: the guest asks for an A record, gets a real public IPv4, and the host has
+// no route to it. Measured -- a venue applied its machine config, left maintenance mode, and then
+// never installed, because pulling ghcr.io/siderolabs/installer had no path:
+//
+//	handler -> ghcr.io   remote_ip=64:ff9b::8c52:7222
+//	guest   -> slirp     IPv4 only
+//
+// Opt-in via TINQ_GUEST_IPV6 rather than always-on. A guest that suddenly has an IPv6 default route
+// will prefer it, and on a laptop with broken or filtered IPv6 that turns a working bring-up into a
+// hanging one -- a regression nobody would connect to this.
+func guestIPv6() string {
+	if os.Getenv("TINQ_GUEST_IPV6") == "" {
+		return ""
+	}
+	return ",ipv6=on"
+}
