@@ -71,6 +71,22 @@ func main() {
 	// which means one flag object serves both: cobra parses it, driverkit reads
 	// it. Changing driverkit's signature for a CLI refactor would ripple into
 	// every other provider built on the same contract.
+	// -install SHORT-CIRCUITS COBRA, deliberately. It runs before any command wiring because it is
+	// not a tinq operation: it is how this binary gets to a filesystem where qemu exists. Routing it
+	// through cobra would make an image-plumbing concern look like a verb.
+	for i, a := range os.Args[1:] {
+		if a == "-install" || a == "--install" {
+			dest := ""
+			if i+2 < len(os.Args) {
+				dest = os.Args[i+2]
+			}
+			if err := installSelf(dest); err != nil {
+				fmt.Fprintf(os.Stderr, "tinq: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 	driverkit.Kubeconfig()
 	// SilenceErrors keeps cobra from printing the error itself; we print it
 	// ONCE here. Without this the pair (SilenceErrors, SilenceUsage) makes a bad
