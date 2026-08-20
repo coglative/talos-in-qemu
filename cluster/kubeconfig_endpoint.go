@@ -100,3 +100,42 @@ func talosconfigHost(endpoint string) string {
 
 	return endpoint
 }
+
+// advertiseKubeconfig republishes the server under a NAME a consumer elsewhere can dial, keeping
+// scheme and port. Without it every carrier must rewrite the file AND know the naming convention --
+// a carrier requiring its reader to know it. An empty name is a no-op.
+// See TestKubeconfigCanBeAdvertisedUnderAName.
+func advertiseKubeconfig(kubeconfig []byte, name string) []byte {
+	if name == "" {
+		return kubeconfig
+	}
+
+	out := make([]string, 0, 64)
+
+	for _, line := range strings.Split(string(kubeconfig), "\n") {
+		out = append(out, advertiseServerLine(line, name))
+	}
+
+	return []byte(strings.Join(out, "\n"))
+}
+
+// advertiseServerLine rewrites one `server:` line's HOST, keeping indentation, scheme and port.
+func advertiseServerLine(line, name string) string {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "server:") {
+		return line
+	}
+
+	u, err := url.Parse(strings.TrimSpace(strings.TrimPrefix(trimmed, "server:")))
+	if err != nil || u.Host == "" {
+		return line
+	}
+
+	if _, port, err := net.SplitHostPort(u.Host); err == nil {
+		u.Host = net.JoinHostPort(name, port)
+	} else {
+		u.Host = name
+	}
+
+	return line[:len(line)-len(trimmed)] + "server: " + u.String()
+}

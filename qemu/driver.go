@@ -608,6 +608,7 @@ func upOptions(d *hvf, m *unstructured.Unstructured, state driverkit.State,
 		StateDir:      dir,
 		TalosEndpoint: talosEndpoint(m),
 		KubeEndpoint:  kubeEndpoint(m),
+		AdvertiseName: advertiseName(m),
 		// A SERIAL, ALWAYS, on this path: main.go sets `serial=` on the QEMU
 		// devices itself, so a guest's disks are named by construction and the
 		// WWID alternative a DiskRef also carries has nothing to describe here.
@@ -1539,4 +1540,10 @@ func netdevArg(m *unstructured.Unstructured) string {
 		}
 	}
 	return netdev
+}
+
+// advertiseName is the workspace-facing name a consumer elsewhere dials, or "".
+func advertiseName(m *unstructured.Unstructured) string {
+	v, _, _ := unstructured.NestedString(m.Object, "spec", "advertiseName")
+	return v
 }

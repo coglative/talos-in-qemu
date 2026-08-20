@@ -286,6 +286,18 @@ spec:
                     name: { type: string }
                     namespace: { type: string }
                     key: { type: string, default: machineconfig }
+                advertiseName:
+                  type: string
+                  description: >-
+                    A NAME a consumer elsewhere dials, e.g. a Kubernetes Service
+                    name. Optional. When set, a second kubeconfig is written
+                    beside the first with its server rewritten to this name --
+                    NOT a replacement, because the file this machine's own
+                    bring-up uses has to name an address the HOST can reach and
+                    the file a remote consumer uses has to name one IT can
+                    reach. A name rather than an address: the apiserver's
+                    certificate is minted before anything knows where the
+                    machine landed, and an address moves.
                 hostForwards:
                   type: array
                   description: >-

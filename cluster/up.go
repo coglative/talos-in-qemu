@@ -99,6 +99,14 @@ type UpOptions struct {
 	// node it is the node's own address, where there is no forward at all. It
 	// is also what apid's certificate is issued for — see apiAddress.
 	TalosEndpoint string
+	// AdvertiseName is a name a consumer ELSEWHERE dials, and it is optional.
+	//
+	// When set, a SECOND kubeconfig is written beside the first. Not a replacement: the file this
+	// package uses to wait for a Ready node has to name an address the handler can reach, and the
+	// file a workspace uses has to name one IT can reach. Rewriting one into the other would break
+	// whichever consumer did not ask.
+	AdvertiseName string
+
 	// KubeEndpoint is the same address for kube-apiserver, as a URL: a
 	// forward's host side under QEMU, the node's own address on hardware.
 	KubeEndpoint string
@@ -532,6 +540,15 @@ func Up(ctx context.Context, opts UpOptions) error {
 
 	if err := writeArtifacts(opts.StateDir, map[string][]byte{"kubeconfig": kubeconfig}); err != nil {
 		return fail(err)
+	}
+
+	// The workspace-facing copy, written BESIDE the node-facing one rather than over it. A carrier
+	// then only has to carry: it does not have to know this venue's naming convention to make the
+	// file usable, which is what would make the convention a thing every carrier must learn.
+	if adv := advertiseKubeconfig(kubeconfig, opts.AdvertiseName); opts.AdvertiseName != "" {
+		if err := writeArtifacts(opts.StateDir, map[string][]byte{"kubeconfig.advertised": adv}); err != nil {
+			return fail(err)
+		}
 	}
 
 	// The KUBERNETES API, not the Talos one: the Talos API answers long before
