@@ -992,6 +992,10 @@ func waitGone(ctx context.Context, pid int, dir string, d time.Duration) (bool, 
 // holds the only credential to one that survives its own registration — see
 // forgetBaremetal.
 func (h *hvf) Destroy(ctx context.Context, m *unstructured.Unstructured) error {
+	// STOP ANY BRING-UP FIRST. cluster.Up calls create(), so a run still in flight rebuilds the disk
+	// and boots qemu against a machine being destroyed -- teardown removes it, the goroutine puts it
+	// back, and the leak looks like Destroy having silently failed.
+	bootstraps.cancel(string(m.GetUID()))
 	if isBaremetal(m) {
 		return forgetBaremetal(m, h.dir(m))
 	}

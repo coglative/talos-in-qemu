@@ -37,17 +37,17 @@ func TestWantsBootstrapIsOptIn(t *testing.T) {
 // says corrupts the state dir, arrived at from a different direction.
 func TestBootstrapAdmitsOneAttemptPerMachine(t *testing.T) {
 	b := newBootstrapper()
-	if !b.begin("u1") {
+	if _, ok := b.begin("u1"); !ok {
 		t.Fatal("the first attempt must be admitted")
 	}
-	if b.begin("u1") {
+	if _, ok := b.begin("u1"); ok {
 		t.Fatal("a second attempt ran while the first was in flight")
 	}
-	if !b.begin("u2") {
+	if _, ok := b.begin("u2"); !ok {
 		t.Fatal("a different machine must not be blocked by another's bring-up")
 	}
 	b.done("u1")
-	if !b.begin("u1") {
+	if _, ok := b.begin("u1"); !ok {
 		t.Fatal("after an attempt finishes, a retry must be admitted -- bring-up is idempotent")
 	}
 }

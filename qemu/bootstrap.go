@@ -30,21 +30,41 @@ import (
 // handler restart, which loses this process-local memory, costs a fast no-op rather than a rebuild.
 type bootstrapper struct {
 	mu       sync.Mutex
-	inFlight map[string]bool
+	inFlight map[string]context.CancelFunc
 }
 
 func newBootstrapper() *bootstrapper {
-	return &bootstrapper{inFlight: map[string]bool{}}
+	return &bootstrapper{inFlight: map[string]context.CancelFunc{}}
 }
 
-func (b *bootstrapper) begin(uid string) bool {
+func (b *bootstrapper) begin(uid string) (context.Context, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.inFlight[uid] {
-		return false
+	if _, running := b.inFlight[uid]; running {
+		return nil, false
 	}
-	b.inFlight[uid] = true
-	return true
+	// DETACHED FROM THE TICK, BUT NOT UNCANCELLABLE, and the difference is a leaked VM.
+	//
+	// This was context.WithoutCancel, so a bring-up could not be stopped by anything. cluster.Up
+	// calls create(), so a run still in flight when the machine is DESTROYED rebuilds the disk and
+	// boots qemu against an object that no longer exists -- Destroy tears down, the goroutine puts
+	// it back, and the state dir reappears under the same UID.
+	//
+	// Measured 2/2 on a teardown loop: "teardown reported complete, releasing the finalizer",
+	// followed by a live qemu and a state dir on disk.
+	ctx, cancel := context.WithCancel(context.Background())
+	b.inFlight[uid] = cancel
+	return ctx, true
+}
+
+// cancel stops an in-flight bring-up. Called when the machine is being destroyed: the run has no
+// object left to bring up, and letting it finish recreates what teardown just removed.
+func (b *bootstrapper) cancel(uid string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if stop, ok := b.inFlight[uid]; ok {
+		stop()
+	}
 }
 
 func (b *bootstrapper) done(uid string) {
@@ -70,14 +90,15 @@ func maybeBootstrap(ctx context.Context, d *hvf, m *unstructured.Unstructured,
 		return
 	}
 	uid := string(m.GetUID())
-	if !bootstraps.begin(uid) {
+	runCtx, started := bootstraps.begin(uid)
+	if !started {
 		return
 	}
 	name := m.GetName()
 	go func() {
 		defer bootstraps.done(uid)
 		log.Printf("%s: bringing up the cluster", name)
-		if err := bringUp(context.WithoutCancel(ctx), d, m, state, status); err != nil {
+		if err := bringUp(runCtx, d, m, state, status); err != nil {
 			log.Printf("%s: bring-up: %v", name, err)
 			return
 		}
