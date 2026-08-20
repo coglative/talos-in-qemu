@@ -1171,8 +1171,28 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 		// /dev/vdX warning above is about, arriving through a different door.
 		"-drive", "if=none,id=sys,format=qcow2,file=" + diskPath,
 		"-device", "virtio-blk-pci,drive=sys,serial=" + DiskSerialSystem + ",bootindex=0",
-		"-drive", "if=none,id=cd,media=cdrom,file=" + image,
-		"-device", "virtio-blk-pci,drive=cd,bootindex=1",
+	}
+
+	// THE INSTALL MEDIA GOES AWAY ONCE THERE IS A SYSTEM, and it keeps its exact
+	// position while it is there -- a machine that still needs it has the argv it
+	// always had.
+	//
+	// bootindex puts the disk first, and that is what builds the boot list on a
+	// machine which has never booted. But OVMF persists BootOrder in efivars, and
+	// an ISO entry that exists can win a later boot: measured, a venue installed,
+	// ran the installed system for 44s, rebooted into the ISO's menu, and came
+	// back in maintenance mode with a different CA -- so bootstrap failed with an
+	// x509 error that says nothing about boot order.
+	//
+	// A device that is not there cannot be chosen, which is a smaller claim than
+	// winning an argument with the firmware's boot list.
+	if attachInstallMedia(dir) {
+		args = append(args,
+			"-drive", "if=none,id=cd,media=cdrom,file="+image,
+			"-device", "virtio-blk-pci,drive=cd,bootindex=1")
+	}
+
+	args = append(args,
 		"-netdev", netdev,
 		"-device", "virtio-net-pci,netdev=n0",
 		// ENTROPY, and it decides whether the bring-up works at all. Talos's
@@ -1191,10 +1211,9 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 		// there is no node to ask.
 		"-device", "virtio-rng-pci",
 		"-display", "none",
-		"-serial", "file:" + filepath.Join(dir, "serial.log"),
+		"-serial", "file:"+filepath.Join(dir, "serial.log"),
 		"-pidfile", filepath.Join(dir, "qemu.pid"),
-		"-daemonize",
-	}
+		"-daemonize")
 
 	// APPENDED, not spliced into the literal above, so the no-dataDisk argv is
 	// unchanged down to the position of every element.
