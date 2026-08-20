@@ -46,7 +46,7 @@ func TestBootstrapAdmitsOneAttemptPerMachine(t *testing.T) {
 	if _, ok := b.begin("u2"); !ok {
 		t.Fatal("a different machine must not be blocked by another's bring-up")
 	}
-	b.done("u1")
+	b.done("u1", false)
 	if _, ok := b.begin("u1"); !ok {
 		t.Fatal("after an attempt finishes, a retry must be admitted -- bring-up is idempotent")
 	}

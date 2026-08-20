@@ -31,16 +31,29 @@ import (
 type bootstrapper struct {
 	mu       sync.Mutex
 	inFlight map[string]context.CancelFunc
+	// done records machines this process has already brought up. The guard above stops two runs
+	// OVERLAPPING; without this one, every tick after a success starts another.
+	brought map[string]bool
 }
 
 func newBootstrapper() *bootstrapper {
-	return &bootstrapper{inFlight: map[string]context.CancelFunc{}}
+	return &bootstrapper{inFlight: map[string]context.CancelFunc{}, brought: map[string]bool{}}
 }
 
 func (b *bootstrapper) begin(uid string) (context.Context, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, running := b.inFlight[uid]; running {
+		return nil, false
+	}
+	// ONCE PER MACHINE, not once per tick. The in-flight guard only stops two runs OVERLAPPING, so
+	// after each success the next tick started another: measured at 18 bring-ups in 12 minutes, one
+	// per interval, each a fast no-op because `up` skips completed steps.
+	//
+	// Harmless-looking and not harmless: it means a bring-up is almost ALWAYS in flight, and a
+	// teardown that lands on one leaks the VM. The perpetual loop is what made teardown look
+	// randomly broken.
+	if b.brought[uid] {
 		return nil, false
 	}
 	// DETACHED FROM THE TICK, BUT NOT UNCANCELLABLE, and the difference is a leaked VM.
@@ -67,10 +80,15 @@ func (b *bootstrapper) cancel(uid string) {
 	}
 }
 
-func (b *bootstrapper) done(uid string) {
+// done releases the in-flight slot. ok records whether the run SUCCEEDED: a failure must stay
+// retryable, or one bad attempt strands the venue until the handler restarts.
+func (b *bootstrapper) done(uid string, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.inFlight, uid)
+	if ok {
+		b.brought[uid] = true
+	}
 }
 
 var bootstraps = newBootstrapper()
@@ -96,12 +114,13 @@ func maybeBootstrap(ctx context.Context, d *hvf, m *unstructured.Unstructured,
 	}
 	name := m.GetName()
 	go func() {
-		defer bootstraps.done(uid)
 		log.Printf("%s: bringing up the cluster", name)
 		if err := bringUp(runCtx, d, m, state, status); err != nil {
 			log.Printf("%s: bring-up: %v", name, err)
+			bootstraps.done(uid, false)
 			return
 		}
 		log.Printf("%s: cluster up", name)
+		bootstraps.done(uid, true)
 	}()
 }
