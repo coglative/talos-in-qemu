@@ -271,12 +271,17 @@ func RootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// NODE_NAME comes from the environment, never a flag. A flag is a compatibility
+			// contract in the wrong direction -- the reader must know the name, so a DaemonSet
+			// rolled with --node against an older pinned image exits 2 and crashloops. An unknown
+			// environment variable is ignored, so writer and reader roll independently.
 			return driverkit.Run(cmd.Context(), driverkit.Config{
 				GVR: schema.GroupVersionResource{
 					Group: "machine.hvf.fleet.io", Version: "v1alpha1", Resource: "talosmachines",
 				},
 				Finalizer: "machine.hvf.fleet.io/vm",
 				Interval:  interval,
+				NodeName:  os.Getenv("NODE_NAME"),
 			}, d)
 		},
 	}

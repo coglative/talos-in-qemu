@@ -406,6 +406,12 @@ spec:
             status:
               type: object
               properties:
+                node:
+                  type: string
+                  description: >-
+                    The node holding this machine, claimed first-writer-wins. A driver
+                    configured with NODE_NAME skips machines another node already holds;
+                    one left empty by an unconfigured driver means every replica acts.
                 pid: { type: integer }
                 powerState: { type: string, description: Observed power state; may lag spec. }
                 stateDir: { type: string, description: Per-machine state root — removed on delete. }

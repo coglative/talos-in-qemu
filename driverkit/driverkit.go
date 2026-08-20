@@ -125,6 +125,13 @@ type Config struct {
 	GVR       schema.GroupVersionResource
 	Finalizer string
 	Interval  time.Duration
+
+	// NodeName is the node this driver actuates for, and it partitions the machines it will touch.
+	// Empty keeps the original behaviour of reconciling everything listed, which is right for a
+	// single process that owns every machine. Set it when more than one replica can see the same
+	// machine: Run's comment explains why serial reconciliation stops being sufficient there.
+	// The claim is first-writer-wins on status.node, and a machine another node holds is skipped.
+	NodeName string
 }
 
 // Run is the reconcile loop. It owns the finalizer dance and status publishing
@@ -214,6 +221,23 @@ func reconcile(ctx context.Context, dc dynamic.Interface, cfg Config, d Driver, 
 		_, err := ri.Patch(ctx, m.GetName(), "application/merge-patch+json",
 			[]byte(`{"metadata":{"finalizers":[]}}`), metav1.PatchOptions{})
 		return err
+	}
+
+	if cfg.NodeName != "" {
+		holder, _, err := unstructured.NestedString(m.Object, "status", "node")
+		if err != nil {
+			return fmt.Errorf("read status.node: %w", err)
+		}
+		if holder != "" && holder != cfg.NodeName {
+			return nil
+		}
+		if holder == "" {
+			body := fmt.Sprintf(`{"status":{"node":%q}}`, cfg.NodeName)
+			if _, err := ri.Patch(ctx, m.GetName(), "application/merge-patch+json",
+				[]byte(body), metav1.PatchOptions{}, "status"); err != nil {
+				return fmt.Errorf("claim: %w", err)
+			}
+		}
 	}
 
 	if !hasFinalizer(m, cfg.Finalizer) {
