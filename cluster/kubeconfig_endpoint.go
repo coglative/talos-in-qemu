@@ -64,3 +64,39 @@ func kubeconfigHost(endpoint string) string {
 
 	return u.Host
 }
+
+// retargetTalosconfig rewrites wildcard `endpoints:` entries, and reports whether it changed any.
+//
+// The kubeconfig's twin, needing its own path because step 6 REUSES this file rather than
+// regenerating it -- so a node configured before the fix keeps a bind address forever. tinq passes
+// the endpoint explicitly and never reads this field; the reader it misleads is a human with
+// TALOSCONFIG set. See TestWildcardTalosEndpointIsRetargeted.
+func retargetTalosconfig(talosconfig []byte, host string) ([]byte, bool) {
+	if host == "" || wildcardHosts[host] {
+		return talosconfig, false
+	}
+
+	changed := false
+	out := make([]string, 0, 64)
+
+	for _, line := range strings.Split(string(talosconfig), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(trimmed, "- "); ok && wildcardHosts[strings.TrimSpace(v)] {
+			line = line[:len(line)-len(trimmed)] + "- " + host
+			changed = true
+		}
+
+		out = append(out, line)
+	}
+
+	return []byte(strings.Join(out, "\n")), changed
+}
+
+// talosconfigHost is a Talos endpoint's host, or the whole string when it carries no port.
+func talosconfigHost(endpoint string) string {
+	if h, _, err := net.SplitHostPort(endpoint); err == nil {
+		return h
+	}
+
+	return endpoint
+}

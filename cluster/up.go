@@ -420,6 +420,16 @@ func Up(ctx context.Context, opts UpOptions) error {
 		return fail(err)
 	}
 
+	// Repaired in place when it names a bind address, because step 6 below reuses this file rather
+	// than regenerating it -- so a node configured before the fix would keep one forever.
+	if repaired, changed := retargetTalosconfig(talosconfig, talosconfigHost(opts.TalosEndpoint)); changed {
+		if err := writeArtifacts(opts.StateDir, map[string][]byte{"talosconfig": repaired}); err != nil {
+			return fail(err)
+		}
+
+		talosconfig = repaired
+	}
+
 	if configured {
 		// Every skipped step is still ANNOUNCED, under its own number. The
 		// numbering is what an operator reads the sequence by, so a resumed run
