@@ -198,6 +198,26 @@ func Run(ctx context.Context, cfg Config, d Driver) error {
 func reconcile(ctx context.Context, dc dynamic.Interface, cfg Config, d Driver, m *unstructured.Unstructured) error {
 	ri := dc.Resource(cfg.GVR)
 
+	// NOT MINE, INCLUDING ITS DELETION. Run lists with no selector, so every handler sees every
+	// machine; this check kept three nodes from each building a VM for one CR, and it used to sit
+	// BELOW the delete branch. So on a delete every node ran Destroy and the first to finish
+	// released the finalizer -- truthfully, about its own disk, where there was nothing -- and the
+	// node actually holding the VM never got the chance. See TestReconcileDoesNotDestroyAMachine-
+	// AnotherNodeHolds for the measurement.
+	//
+	// An UNCLAIMED machine is deliberately not skipped: no node holds a VM for it, so no Destroy
+	// has anything to do, and declining here would trade a leak for a wedged finalizer.
+	if cfg.NodeName != "" {
+		holder, _, err := unstructured.NestedString(m.Object, "status", "node")
+		if err != nil {
+			return fmt.Errorf("read status.node: %w", err)
+		}
+
+		if holder != "" && holder != cfg.NodeName {
+			return nil
+		}
+	}
+
 	// DELETE FIRST. Destroy must succeed before the finalizer goes, so a failed
 	// teardown blocks deletion instead of leaking silently.
 	if m.GetDeletionTimestamp() != nil {
@@ -228,9 +248,7 @@ func reconcile(ctx context.Context, dc dynamic.Interface, cfg Config, d Driver, 
 		if err != nil {
 			return fmt.Errorf("read status.node: %w", err)
 		}
-		if holder != "" && holder != cfg.NodeName {
-			return nil
-		}
+
 		if holder == "" {
 			body := fmt.Sprintf(`{"status":{"node":%q}}`, cfg.NodeName)
 			if _, err := ri.Patch(ctx, m.GetName(), "application/merge-patch+json",
