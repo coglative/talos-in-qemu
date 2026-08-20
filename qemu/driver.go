@@ -690,6 +690,11 @@ func (h *hvf) Observe(ctx context.Context, m *unstructured.Unstructured) (driver
 	// hand-rolled loop also reported "127.0.0.1:0" for an entry with a
 	// guestPort and no hostPort — an address, printed as status, that cannot
 	// answer.
+	// Republish the forwards on IPv6 if this host has no other IPv4 address. Done here, on every
+	// tick, because a bridge is a process-local listener and the guest is not: qemu survives this
+	// binary restarting, so a bridge established once at Create is gone while the VM still runs.
+	bridgeForwards(m)
+
 	return driverkit.Running, map[string]interface{}{
 		"pid": int64(pid), "stateDir": dir, "apiEndpoint": talosEndpoint(m),
 	}, nil
