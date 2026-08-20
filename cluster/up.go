@@ -445,7 +445,18 @@ func Up(ctx context.Context, opts UpOptions) error {
 		// other.
 		started := time.Now()
 		if err := hooks.waitBootstrapReady(ctx, talosconfig, installed, installTimeout); err != nil {
-			return fail(err)
+			// THE APPLY THAT NEVER LANDED, which the comment above says this side cannot tell
+			// from a stopped machine. Asking the node tells them apart: a node still in
+			// MAINTENANCE never took the config, so waiting out installTimeout again -- every
+			// time, forever -- is the one outcome that cannot become a cluster.
+			//
+			// A human running `up` sees the failure and clears the state dir. A controller does
+			// not: it retries on a timer, and a venue that lands here is stuck for good. So the
+			// config that was already generated is applied, rather than regenerated -- a fresh
+			// bundle would mint a CA this node's talosconfig cannot authenticate against.
+			if !resumeApply(ctx, hooks, opts, p, talosconfig, installed, installTimeout) {
+				return fail(err)
+			}
 		}
 
 		p.step("apply-config", "skipped (already applied), installed system up after %s", took(started))
@@ -1071,4 +1082,42 @@ func fetchKubeconfig(ctx context.Context, talosconfig []byte, endpoint string) (
 	}
 
 	return kubeconfig, nil
+}
+
+// resumeProbeTimeout is how long resumeApply waits to hear maintenance mode.
+//
+// SHORT, because it is a question and not a wait: the node has been running long enough to fail the
+// install wait above, so it is either in maintenance now or it is not. A generous budget here would
+// add itself to every genuinely-failed bring-up.
+const resumeProbeTimeout = 15 * time.Second
+
+// resumeApply re-applies an already-generated config to a node still in maintenance mode.
+//
+// It reports whether the bring-up may continue. False means "not this failure" -- the node is not
+// in maintenance, so whatever went wrong is not an apply that was written and never sent, and the
+// caller's original error is the honest one to return.
+//
+// The config is read from the state dir, never regenerated: generating again mints a fresh secrets
+// bundle whose CA is not the one the talosconfig beside it carries, so the node would become
+// unreachable with the only credential that could reach it.
+func resumeApply(ctx context.Context, hooks *upHooks, opts UpOptions, p *printer,
+	talosconfig []byte, installed string, installTimeout time.Duration) bool {
+	if err := hooks.waitMaintenance(ctx, opts.TalosEndpoint, resumeProbeTimeout); err != nil {
+		return false
+	}
+
+	config, err := os.ReadFile(filepath.Join(opts.StateDir, "controlplane.yaml"))
+	if err != nil {
+		return false
+	}
+
+	p.step("apply-config", "resuming: the config was written but never applied")
+	p.detail("this node has a talosconfig and is STILL IN MAINTENANCE, so a previous run wrote")
+	p.detail("its artifacts and stopped before the node took them. Applying what is already")
+	p.detail("there, because regenerating would mint a CA that talosconfig cannot authenticate")
+
+	if err := hooks.applyConfig(ctx, opts.TalosEndpoint, config); err != nil {
+		return false
+	}
+	return hooks.waitBootstrapReady(ctx, talosconfig, installed, installTimeout) == nil
 }
