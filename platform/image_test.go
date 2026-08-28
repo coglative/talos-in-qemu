@@ -413,10 +413,17 @@ func TestInspectImageVersion(t *testing.T) {
 		{"", ""},
 		{"1_13_7", ""},          // version-shaped, no TALOS_V prefix
 		{"TALOS_V1_13", ""},     // too few components
-		{"TALOS_V1_13_7_1", ""}, // too many components
-		{"TALOS_V1__7", ""},     // empty component
-		{"TALOS_VX_Y_Z", ""},    // non-numeric
-		{"TALOS_V1_13_7a", ""},  // trailing junk inside a component
+		{"TALOS_V1_13_7_1", ""}, // four components is still not a version
+		// Pre-release ids carry the channel in the same underscore field.
+		{"TALOS_V1_14_0_BETA_1", "v1.14.0-beta.1"},
+		{"TALOS_V1_14_0_RC_2", "v1.14.0-rc.2"},
+		{"TALOS_V1_14_0_ALPHA_0", "v1.14.0-alpha.0"},
+		{"TALOS_V1_14_0_BETA_X", ""},  // pre-release ordinal must be numeric
+		{"TALOS_V1_14_0_BETA1_1", ""}, // channel must be letters only
+		{"TALOS_V1_14_0__1", ""},      // empty channel
+		{"TALOS_V1__7", ""},           // empty component
+		{"TALOS_VX_Y_Z", ""},          // non-numeric
+		{"TALOS_V1_13_7a", ""},        // trailing junk inside a component
 		// The two bytes that sit either side of '0'..'9' in ASCII. Anything
 		// looser than an exact digit range admits one of these and yields a
 		// version string like "v1.1.:" that nothing downstream can parse.
