@@ -33,6 +33,13 @@ type Platform struct {
 	FirmwareVars string // nvram TEMPLATE, copied verbatim — never padded
 	ConsoleArg   string // console=ttyS0 | console=ttyAMA0 (guest hint)
 	ImageArch    string // amd64 | arm64 (guest hint, used by the image guard)
+	// TPMDevice is the qemu device model for an emulated TPM 2.0, and it is
+	// ARCH-SPECIFIC rather than a constant: x86_64 offers tpm-crb, the
+	// interface UEFI guests expect, while aarch64 offers neither tpm-crb nor
+	// tpm-tis -- `qemu-system-aarch64 -device help` lists only
+	// tpm-tis-device. Naming the wrong one is not a warning; qemu refuses to
+	// start, and the machine never appears.
+	TPMDevice string
 }
 
 type archInfo struct {
@@ -41,6 +48,7 @@ type archInfo struct {
 	console    string
 	imageArch  string
 	fwArch     string // the "architecture" value used in firmware descriptors
+	tpmDevice  string // qemu device model for an emulated TPM 2.0
 }
 
 // archFor maps Go's arch vocabulary onto QEMU's. They disagree: Go says amd64
@@ -49,9 +57,9 @@ type archInfo struct {
 func archFor(goarch string) (archInfo, error) {
 	switch goarch {
 	case "amd64":
-		return archInfo{"qemu-system-x86_64", "q35", "console=ttyS0", "amd64", "x86_64"}, nil
+		return archInfo{"qemu-system-x86_64", "q35", "console=ttyS0", "amd64", "x86_64", "tpm-crb"}, nil
 	case "arm64":
-		return archInfo{"qemu-system-aarch64", "virt", "console=ttyAMA0", "arm64", "aarch64"}, nil
+		return archInfo{"qemu-system-aarch64", "virt", "console=ttyAMA0", "arm64", "aarch64", "tpm-tis-device"}, nil
 	}
 	return archInfo{}, fmt.Errorf("unsupported host architecture %q: TinQ supports amd64 and arm64", goarch)
 }
@@ -103,5 +111,6 @@ func Detect() (*Platform, error) {
 		FirmwareVars: vars,
 		ConsoleArg:   ai.console,
 		ImageArch:    ai.imageArch,
+		TPMDevice:    ai.tpmDevice,
 	}, nil
 }

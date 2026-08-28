@@ -2113,3 +2113,149 @@ func TestRegistryMirrorsRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestSpecExtraDisks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		doc  string
+		want []string
+	}{
+		{"two", "spec:\n  extraDisks: [4Gi, 4Gi]\n", []string{"4Gi", "4Gi"}},
+		{"one", "spec:\n  extraDisks: [\"8Gi\"]\n", []string{"8Gi"}},
+		{"absent", "spec:\n  cpu: 2\n", nil},
+		{"empty list", "spec:\n  extraDisks: []\n", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := specExtraDisks(specFromYAML(t, tc.doc))
+			if len(got) != len(tc.want) {
+				t.Fatalf("specExtraDisks = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("specExtraDisks[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// The serials are a SET the machine config selects with a prefix match, so the
+// prefix is load-bearing: rename it here and every selector stops matching.
+func TestExtraDiskSerial(t *testing.T) {
+	for i, want := range map[int]string{0: "talos-extra-0", 1: "talos-extra-1"} {
+		if got := extraDiskSerial(i); got != want {
+			t.Errorf("extraDiskSerial(%d) = %q, want %q", i, got, want)
+		}
+	}
+	if !strings.HasPrefix(extraDiskSerial(0), DiskSerialExtra) {
+		t.Errorf("extraDiskSerial(0) = %q, want the %q prefix the selectors match on",
+			extraDiskSerial(0), DiskSerialExtra)
+	}
+}
+
+func TestSpecTPM(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		doc  string
+		want bool
+	}{
+		{"true", "spec:\n  tpm: true\n", true},
+		{"false", "spec:\n  tpm: false\n", false},
+		{"absent", "spec:\n  cpu: 2\n", false},
+		{"non-boolean", "spec:\n  tpm: yes-please\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := specTPM(specFromYAML(t, tc.doc)); got != tc.want {
+				t.Errorf("specTPM = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnsureSWTPM covers the vTPM lifecycle, which is a SECOND process per
+// machine and therefore has two failure modes qemu never reports: a duplicate
+// started by the next reconcile tick, and one left running after the machine is
+// destroyed.
+func TestEnsureSWTPM(t *testing.T) {
+	requireSWTPM(t)
+
+	dir := t.TempDir()
+
+	sock, err := ensureSWTPM(dir)
+	if err != nil {
+		t.Fatalf("ensureSWTPM: %v", err)
+	}
+
+	if want := swtpmSocketPath(dir); sock != want {
+		t.Errorf("socket = %q, want %q", sock, want)
+	}
+
+	// The limit this path exists to respect: sockaddr_un.sun_path is 104 bytes
+	// on darwin. A machine directory alone can exceed it, so assert the bound
+	// rather than trusting that today's temp dir happens to be short.
+	if len(sock) >= 104 {
+		t.Errorf("swtpm socket path is %d bytes, over the 104-byte sun_path limit: %s", len(sock), sock)
+	}
+
+	// The state directory is what makes a sealed key survive a restart; without
+	// it the guest boots once and can never unseal again.
+	if fi, err := os.Stat(filepath.Join(dir, "tpm")); err != nil || !fi.IsDir() {
+		t.Errorf("tpm state dir missing: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "swtpm.pid"))
+	if err != nil {
+		t.Fatalf("pidfile: %v", err)
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("pidfile holds %q", strings.TrimSpace(string(b)))
+	}
+
+	if !platform.ProcessMatches(pid, dir) {
+		t.Fatalf("swtpm pid %d is not running for %s", pid, dir)
+	}
+
+	// Idempotence: create() runs every reconcile tick, and a second swtpm on the
+	// same state directory is two writers to one TPM's NVRAM, not a duplicate.
+	sock2, err := ensureSWTPM(dir)
+	if err != nil {
+		t.Fatalf("second ensureSWTPM: %v", err)
+	}
+
+	if sock2 != sock {
+		t.Errorf("second call returned %q, want %q", sock2, sock)
+	}
+
+	b2, err := os.ReadFile(filepath.Join(dir, "swtpm.pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if pid2, _ := strconv.Atoi(strings.TrimSpace(string(b2))); pid2 != pid {
+		t.Errorf("a second swtpm was started: pid %d then %d", pid, pid2)
+	}
+
+	// destroy() must reap it: swtpm is not qemu's child, so killing qemu leaves
+	// it holding the control socket.
+	if err := destroy(t.Context(), dir); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	for i := 0; i < 50 && platform.ProcessMatches(pid, dir); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if platform.ProcessMatches(pid, dir) {
+		t.Errorf("swtpm pid %d survived destroy", pid)
+	}
+}
+
+func requireSWTPM(t *testing.T) {
+	t.Helper()
+
+	if _, err := exec.LookPath("swtpm"); err != nil {
+		t.Skip("swtpm not on PATH")
+	}
+}

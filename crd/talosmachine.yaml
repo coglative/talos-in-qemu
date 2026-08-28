@@ -122,6 +122,30 @@ spec:
                     (talos-data), never by size — with two large disks a size
                     matcher becomes a coin flip between the OS target and this.
                     Omit for a single-disk machine with no StorageClass.
+                extraDisks:
+                  type: array
+                  items:
+                    type: string
+                  description: >-
+                    Optional additional disks, e.g. ["4Gi", "4Gi"], for layouts
+                    that need more than one spindle — a mirror, or an array a
+                    volume is carved from. Serialised talos-extra-<i>, so a
+                    machine config selects them as a set with
+                    disk.serial.startsWith("talos-extra-").
+                tpm:
+                  type: boolean
+                  description: >-
+                    Attach an emulated TPM 2.0 (requires swtpm on the host).
+                    Needed for TPM-sealed disk encryption. Its NVRAM lives in the
+                    machine's state directory, so a sealed key has exactly the
+                    lifetime of the disks it protects — losing that state makes
+                    those disks unopenable by anything.
+                installerImage:
+                  type: string
+                  description: >-
+                    Override the installer image, which otherwise follows the
+                    ISO's own version. For testing an unreleased or patched
+                    Talos. Omit to keep the pinned default.
                 baremetal:
                   type: object
                   required: [maintenanceEndpoint]

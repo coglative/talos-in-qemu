@@ -27,6 +27,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"log"
@@ -573,6 +574,7 @@ func upOptions(d *hvf, m *unstructured.Unstructured, state driverkit.State,
 		// WWID alternative a DiskRef also carries has nothing to describe here.
 		SystemDisk:     cluster.DiskRef{Serial: DiskSerialSystem},
 		DataDiskSerial: dataDiskSerial(spec),
+		InstallerImage: str(spec["installerImage"], ""),
 
 		TalosVersion:  platform.InspectImageVersion(image),
 		VersionSource: fmt.Sprintf("%s (ISO volume id)", filepath.Base(image)),
@@ -1046,6 +1048,32 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 		}
 	}
 
+	// The OPTIONAL extra disks, for a layout that needs more than one spindle
+	// -- a mirror, or an array a volume is carved out of. Same append
+	// discipline as dataDisk below: a machine with none emits precisely the
+	// argv it emitted before this field existed.
+	var extraPaths []string
+
+	for i, size := range specExtraDisks(spec) {
+		path := filepath.Join(dir, fmt.Sprintf("extra-%d.qcow2", i))
+		if err := ensureQcow2(path, size); err != nil {
+			return 0, err
+		}
+
+		extraPaths = append(extraPaths, path)
+	}
+
+	// The software TPM, started BEFORE qemu because qemu connects to its socket
+	// at startup and fails outright if nothing is listening.
+	tpmSocket := ""
+
+	if specTPM(spec) {
+		var err error
+		if tpmSocket, err = ensureSWTPM(dir); err != nil {
+			return 0, err
+		}
+	}
+
 	varsPath := filepath.Join(dir, "efivars.fd")
 	if err := ensureEFIVars(varsPath, p.FirmwareVars); err != nil {
 		return 0, err
@@ -1172,6 +1200,21 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 			"-device", "virtio-blk-pci,drive=data,serial="+DiskSerialData)
 	}
 
+	// NO bootindex here either, and for the same reason as the data disk.
+	for i, path := range extraPaths {
+		id := fmt.Sprintf("extra%d", i)
+		args = append(args,
+			"-drive", "if=none,id="+id+",format=qcow2,file="+path,
+			"-device", "virtio-blk-pci,drive="+id+",serial="+extraDiskSerial(i))
+	}
+
+	if tpmSocket != "" {
+		args = append(args,
+			"-chardev", "socket,id=chrtpm,path="+tpmSocket,
+			"-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+			"-device", p.TPMDevice+",tpmdev=tpm0")
+	}
+
 	cmd := exec.Command(p.QEMUBinary, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("qemu: %v: %s", err, strings.TrimSpace(string(out)))
@@ -1214,6 +1257,16 @@ func ensureQcow2(path, size string) error {
 
 // destroy is idempotent — it is called on every delete tick until it succeeds.
 func destroy(ctx context.Context, dir string) error {
+	// The vTPM is a SECOND process per machine and nothing else will reap it:
+	// swtpm is not qemu's child, so killing qemu leaves it running and holding
+	// the control socket. Done first and unconditionally — a machine that never
+	// had a TPM simply has no pidfile here.
+	if b, err := os.ReadFile(filepath.Join(dir, "swtpm.pid")); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		}
+	}
+
 	// Destroy does NOT ask the guest to shut down, and that is deliberate: the
 	// disks are deleted immediately below, so a clean shutdown buys nothing and
 	// costs up to a minute. The asymmetry with Stop is the entire point of
@@ -1357,7 +1410,10 @@ func specCPU(spec map[string]interface{}) int {
 // from under an already-installed node.
 const (
 	DiskSerialSystem = "talos-system"
-	DiskSerialData   = "talos-data"
+	// Extra disks are numbered because there can be several and the machine
+	// config selects them as a SET: disk.serial.startsWith("talos-extra-").
+	DiskSerialExtra = "talos-extra"
+	DiskSerialData  = "talos-data"
 )
 
 // specDataDisk resolves spec.dataDisk, the OPTIONAL second disk for PVCs.
@@ -1453,4 +1509,137 @@ func configPatches(m *unstructured.Unstructured) ([]string, error) {
 	}
 
 	return out, nil
+}
+
+// swtpmSocketPath returns a SHORT path for the swtpm control socket.
+//
+// A unix socket path is limited to sockaddr_un.sun_path -- 104 bytes on darwin,
+// 108 on Linux -- and the per-machine state directory is nowhere near short
+// enough: <stateRoot>/<site>/<uid>/ with a real site name such as
+// "ws-coglative-mesh-forgepoll-link-level-triggered" is already past it before
+// the filename. swtpm refuses with "Path for UnixIO socket is too long", which
+// surfaces as a machine that will not start and says nothing about paths.
+//
+// Only the SOCKET moves. The TPM state stays in the machine directory, because
+// that is what has to share the lifetime of the disks whose keys it seals; a
+// socket is recreated on every start and needs no persistence at all.
+func swtpmSocketPath(dir string) string {
+	sum := sha256.Sum256([]byte(dir))
+
+	return filepath.Join(os.TempDir(), fmt.Sprintf("tinq-%x.sock", sum[:6]))
+}
+
+// ensureSWTPM starts the software TPM for this machine and returns its control
+// socket, doing NOTHING if one is already running.
+//
+// Idempotent because create() runs on every reconcile tick, and a second swtpm
+// on the same state directory is not a duplicate -- it is two writers to one
+// TPM's NVRAM.
+//
+// THE STATE DIRECTORY IS THE WHOLE POINT, and it lives beside the disks rather
+// than in /tmp. A TPM-sealed LUKS key is sealed to THIS TPM: lose the state and
+// the disk it was protecting cannot be unsealed by anything, which presents as
+// a machine that boots once and never again. Keeping it in the per-machine
+// directory means it has exactly the lifetime of the disks whose keys it holds.
+func ensureSWTPM(dir string) (string, error) {
+	var (
+		stateDir = filepath.Join(dir, "tpm")
+		sock     = swtpmSocketPath(dir)
+		pidPath  = filepath.Join(dir, "swtpm.pid")
+	)
+
+	if b, err := os.ReadFile(pidPath); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 && platform.ProcessMatches(pid, dir) {
+			return sock, nil
+		}
+	}
+
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return "", fmt.Errorf("swtpm state dir: %w", err)
+	}
+
+	// A stale socket from a killed swtpm is a file, and bind() fails on it.
+	if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("stale swtpm socket: %w", err)
+	}
+
+	out, err := exec.Command("swtpm", "socket",
+		"--tpm2",
+		"--tpmstate", "dir="+stateDir,
+		"--ctrl", "type=unixio,path="+sock,
+		"--daemon",
+		"--pid", "file="+pidPath,
+	).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("swtpm: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// --daemon returns once the socket is bound, but the pidfile is written by
+	// the child; without it destroy() has no handle and the process outlives
+	// the machine.
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(pidPath); err == nil {
+			return sock, nil
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return "", fmt.Errorf("swtpm started but wrote no pidfile at %s", pidPath)
+}
+
+// specExtraDisks resolves spec.extraDisks: additional RAW disks, attached and
+// nothing more.
+//
+// Deliberately NOT dataDisk. dataDisk means "a disk for PVCs", and one field
+// drives both the UserVolumeConfig in the generated machine config and the
+// StorageClass in the cluster (see dataDiskSerial). These disks are the
+// opposite: tinq creates and attaches them, and the machine config decides what
+// they are. That is what makes them usable as members of an MD array, or any
+// other topology the guest assembles itself -- a volume tinq had already
+// claimed for PVCs could not be one.
+//
+// Empty means none, and a machine without the field emits exactly the argv it
+// emitted before the field existed.
+func specExtraDisks(spec map[string]interface{}) []string {
+	raw, ok := spec["extraDisks"].([]interface{})
+	if !ok {
+		return nil
+	}
+
+	sizes := make([]string, 0, len(raw))
+
+	for _, v := range raw {
+		if size := str(v, ""); size != "" {
+			sizes = append(sizes, size)
+		}
+	}
+
+	return sizes
+}
+
+// extraDiskSerial is the serial of the Nth extra disk.
+//
+// A SERIAL, not a device name, for the reason the system disk is selected by
+// one: /dev/vdX is qemu argument order, which is not a contract. A machine
+// config selecting array members by `disk.serial` keeps working when a disk is
+// added, removed, or reordered.
+func extraDiskSerial(i int) string {
+	return fmt.Sprintf("%s-%d", DiskSerialExtra, i)
+}
+
+// specTPM resolves spec.tpm: attach an emulated TPM 2.0 to this machine.
+//
+// Off by default. A vTPM is not free -- it is a second process per machine,
+// with state that has to outlive the guest -- and a machine that does not ask
+// for one must emit the argv it emitted before this field existed.
+//
+// It exists because TPM-sealed disk encryption cannot be tested without one.
+// Talos will happily enroll a TPM key against an emulated device: the
+// SecureBoot check is opt-in (checkSecurebootStatusOnEnroll, default false), so
+// a guest without SecureBoot still seals and unseals.
+func specTPM(spec map[string]interface{}) bool {
+	b, _ := spec["tpm"].(bool)
+
+	return b
 }
