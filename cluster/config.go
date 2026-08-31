@@ -379,6 +379,19 @@ func GenerateConfig(in ConfigInput) (*Generated, error) {
 	// takes a device path, which is exactly the identity we are avoiding.
 	// PatchV1Alpha1 is machinery's own supported way in, and it preserves the
 	// other documents.
+	// UnattendedInstallConfig is a v1alpha1-incompatible way of describing the same thing:
+	// Talos rejects a config that carries both it and machine.install. A patch supplying one
+	// therefore owns the install, and the generated machine.install is dropped.
+	unattended := false
+
+	for _, patch := range in.ConfigPatches {
+		if strings.Contains(patch, "UnattendedInstallConfig") {
+			unattended = true
+
+			break
+		}
+	}
+
 	cfg, err = cfg.PatchV1Alpha1(func(c *v1alpha1.Config) error {
 		// BOTH ARE OPTIONAL POINTERS. machinery 1.13 always allocates them, but
 		// 1.14 stopped emitting machine.install for a config that names no
@@ -387,6 +400,12 @@ func GenerateConfig(in ConfigInput) (*Generated, error) {
 		// about the config that caused it.
 		if c.MachineConfig == nil {
 			c.MachineConfig = &v1alpha1.MachineConfig{}
+		}
+
+		if unattended {
+			c.MachineConfig.MachineInstall = nil
+
+			return nil
 		}
 
 		if c.MachineConfig.MachineInstall == nil {
