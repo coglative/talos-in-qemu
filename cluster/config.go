@@ -402,12 +402,6 @@ func GenerateConfig(in ConfigInput) (*Generated, error) {
 			c.MachineConfig = &v1alpha1.MachineConfig{}
 		}
 
-		if unattended {
-			c.MachineConfig.MachineInstall = nil
-
-			return nil
-		}
-
 		if c.MachineConfig.MachineInstall == nil {
 			c.MachineConfig.MachineInstall = &v1alpha1.InstallConfig{}
 		}
@@ -447,6 +441,11 @@ func GenerateConfig(in ConfigInput) (*Generated, error) {
 		// nothing. Only touched when machinery set it: the field is unknown to
 		// older Talos, and the contract exists to avoid emitting fields a node
 		// cannot parse.
+		if unattended {
+			// dropped LAST, so registries, sysctls and the rest still apply
+			defer func() { c.MachineConfig.MachineInstall = nil }()
+		}
+
 		if in.ConsoleArg != "" && c.MachineConfig.MachineInstall.InstallGrubUseUKICmdline != nil {
 			c.MachineConfig.MachineInstall.InstallGrubUseUKICmdline = new(false)
 		}
