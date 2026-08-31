@@ -1212,12 +1212,14 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 			"-device", "virtio-blk-pci,drive=data,serial="+DiskSerialData)
 	}
 
-	// NO bootindex here either, and for the same reason as the data disk.
+	// Extra disks DO carry a bootindex, unlike the data disk: a layout whose ESP is an
+	// array over them is bootable only if firmware is handed them. They sit after the
+	// system disk and the ISO, so an unused extra disk changes nothing.
 	for i, path := range extraPaths {
 		id := fmt.Sprintf("extra%d", i)
 		args = append(args,
 			"-drive", "if=none,id="+id+",format=qcow2,file="+path,
-			"-device", "virtio-blk-pci,drive="+id+",serial="+extraDiskSerial(i))
+			"-device", fmt.Sprintf("virtio-blk-pci,drive=%s,serial=%s,bootindex=%d", id, extraDiskSerial(i), extraDiskBootIndex+i))
 	}
 
 	if tpmSocket != "" {
@@ -1425,7 +1427,11 @@ const (
 	// Extra disks are numbered because there can be several and the machine
 	// config selects them as a SET: disk.serial.startsWith("talos-extra-").
 	DiskSerialExtra = "talos-extra"
-	DiskSerialData  = "talos-data"
+
+	// extraDiskBootIndex is where extra disks enter the boot order: after the system disk
+	// (0) and the install media (1).
+	extraDiskBootIndex = 2
+	DiskSerialData     = "talos-data"
 )
 
 // specDataDisk resolves spec.dataDisk, the OPTIONAL second disk for PVCs.
