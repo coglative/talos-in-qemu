@@ -393,7 +393,16 @@ func GenerateConfig(in ConfigInput) (*Generated, error) {
 			c.MachineConfig.MachineInstall = &v1alpha1.InstallConfig{}
 		}
 
-		c.MachineConfig.MachineInstall.InstallDiskSelector = installDiskSelector(in.SystemDisk)
+		// A selector and a disk are NOT alternatives Talos weighs: it builds its
+		// match expression from the selector whenever one is present and never
+		// looks at `disk`. So naming the target by path means leaving the
+		// selector NIL, not setting both and hoping the more specific one wins.
+		if in.SystemDisk.DevPath != "" {
+			c.MachineConfig.MachineInstall.InstallDisk = in.SystemDisk.DevPath
+			c.MachineConfig.MachineInstall.InstallDiskSelector = nil
+		} else {
+			c.MachineConfig.MachineInstall.InstallDiskSelector = installDiskSelector(in.SystemDisk)
+		}
 
 		// The image is ALSO set here, not only through WithInstallImage above.
 		// On machinery 1.14 that option is accepted and then silently

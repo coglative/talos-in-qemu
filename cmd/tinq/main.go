@@ -572,7 +572,7 @@ func upOptions(d *hvf, m *unstructured.Unstructured, state driverkit.State,
 		// A SERIAL, ALWAYS, on this path: main.go sets `serial=` on the QEMU
 		// devices itself, so a guest's disks are named by construction and the
 		// WWID alternative a DiskRef also carries has nothing to describe here.
-		SystemDisk:     cluster.DiskRef{Serial: DiskSerialSystem},
+		SystemDisk:     specSystemDisk(spec),
 		DataDiskSerial: dataDiskSerial(spec),
 		InstallerImage: str(spec["installerImage"], ""),
 
@@ -1160,6 +1160,18 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 		// target and the user's data: measured on a live node, that selector
 		// matches BOTH this disk and the dataDisk below. Same failure the
 		// /dev/vdX warning above is about, arriving through a different door.
+		// A REAL SMBIOS UUID, because the default is all zeros and something reads
+		// it. Talos derives its nodeID disk-encryption key from the machine UUID
+		// and refuses 00000000-0000-0000-0000-000000000000 on an entropy check --
+		// correctly, since every guest would otherwise share one key. Without this
+		// a machine simply cannot use node-derived encryption, and the refusal
+		// arrives as "no handlers available to get encryption keys from", which
+		// names neither the UUID nor QEMU.
+		//
+		// Derived from the machine name so it is STABLE across destroy/up: a UUID
+		// that changed per boot would make the key unrecoverable, which is worse
+		// than not having one.
+		"-uuid", machineUUID(m.GetName()),
 		"-drive", "if=none,id=sys,format=qcow2,file=" + diskPath,
 		"-device", "virtio-blk-pci,drive=sys,serial=" + DiskSerialSystem + ",bootindex=0",
 		"-drive", "if=none,id=cd,media=cdrom,file=" + image,
@@ -1586,6 +1598,35 @@ func ensureSWTPM(dir string) (string, error) {
 	}
 
 	return "", fmt.Errorf("swtpm started but wrote no pidfile at %s", pidPath)
+}
+
+// specSystemDisk resolves the install target.
+//
+// By default it is the serial main.go stamps on the guest's system disk. A spec
+// may instead name a device PATH with spec.installDisk, for a target that has no
+// attribute to select on -- an md array assembled before the install carries
+// neither a serial nor a WWID, so no selector can ever name it.
+func specSystemDisk(spec map[string]interface{}) cluster.DiskRef {
+	if p := str(spec["installDisk"], ""); p != "" {
+		return cluster.DiskRef{DevPath: p}
+	}
+
+	return cluster.DiskRef{Serial: DiskSerialSystem}
+}
+
+// machineUUID derives a stable SMBIOS UUID from the machine name.
+//
+// Deterministic on purpose: anything the guest seals to this value has to survive
+// a restart, and a fresh UUID per boot would silently destroy it.
+func machineUUID(name string) string {
+	sum := sha256.Sum256([]byte("tinq-machine-uuid:" + name))
+
+	// RFC 4122 version 4 / variant 10, so it is a well-formed UUID rather than
+	// 16 bytes that merely look like one.
+	sum[6] = (sum[6] & 0x0f) | 0x40
+	sum[8] = (sum[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
 // specExtraDisks resolves spec.extraDisks: additional RAW disks, attached and
