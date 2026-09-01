@@ -223,6 +223,32 @@ func TestGenerateConfigInstallsToTheSystemDiskBySerial(t *testing.T) {
 	}
 }
 
+// A pinned installer is the whole point of testing an unreleased Talos: without
+// it the node quietly installs whatever the ISO's version resolves to, and the
+// only symptom is a version string nobody thinks to ask for.
+func TestGenerateConfigPinsTheInstallerImageWhenAsked(t *testing.T) {
+	in := testInput()
+	in.InstallerImage = "ghcr.io/example/installer:patched"
+
+	doc := v1alpha1Doc(t, mustGenerate(t, in).ControlPlane)
+
+	if !regexp.MustCompile(`(?m)^ {8}image: ghcr\.io/example/installer:patched$`).MatchString(doc) {
+		t.Errorf("install.image is not the pinned installer\n"+
+			"  reason: machinery 1.14 accepts WithInstallImage and discards it when it "+
+			"allocates no machine.install, so the node boots STOCK Talos\n%s", redact(doc))
+	}
+}
+
+// The control for the case above: an unset field must not invent an image.
+func TestGenerateConfigKeepsTheVersionPinnedInstallerByDefault(t *testing.T) {
+	doc := v1alpha1Doc(t, mustGenerateDefault(t).ControlPlane)
+
+	if !regexp.MustCompile(`(?m)^ {8}image: ghcr\.io/siderolabs/installer:`).MatchString(doc) {
+		t.Errorf("install.image is not the version-pinned default\n"+
+			"  reason: an unpinned installer silently becomes a cross-version install\n%s", redact(doc))
+	}
+}
+
 // The serials belong to package main. If this package ever hardcodes them, the
 // two halves drift the moment main.go renames one — and the failure is silent.
 func TestGenerateConfigUsesTheCallersSerials(t *testing.T) {

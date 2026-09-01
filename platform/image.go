@@ -114,21 +114,45 @@ func InspectImageVersion(path string) string {
 		return ""
 	}
 	parts := strings.Split(rest, "_")
-	if len(parts) != 3 {
+	// A PRE-RELEASE id carries its channel in the same underscore-separated
+	// field: TALOS_V1_14_0_BETA_1 is v1.14.0-beta.1. Requiring exactly three
+	// components rejected every rc and beta image outright, and the caller
+	// cannot tell that refusal from "not a Talos ISO" -- both are "". A release
+	// candidate is the image you most want to be running when you are testing a
+	// fix against an unreleased Talos.
+	if len(parts) != 3 && len(parts) != 5 {
 		return ""
 	}
-	for _, p := range parts {
+	for i, p := range parts {
 		// Split yields empty strings for "1__7", and the digit loop below
 		// accepts an empty component by iterating zero times.
 		if p == "" {
 			return ""
 		}
+		// Component 4 is the channel name (BETA, RC, ALPHA) and is the only
+		// non-numeric one; everything else must still be digits, so a stray
+		// word cannot smuggle itself into a version string.
+		if i == 3 {
+			for _, r := range p {
+				if r < 'A' || r > 'Z' {
+					return ""
+				}
+			}
+
+			continue
+		}
+
 		for _, r := range p {
 			if r < '0' || r > '9' {
 				return ""
 			}
 		}
 	}
+
+	if len(parts) == 5 {
+		return "v" + strings.Join(parts[:3], ".") + "-" + strings.ToLower(parts[3]) + "." + parts[4]
+	}
+
 	return "v" + strings.Join(parts, ".")
 }
 

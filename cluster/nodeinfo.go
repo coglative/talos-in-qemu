@@ -258,19 +258,32 @@ func FormatDisks(disks []Disk) string {
 type DiskRef struct {
 	Serial string
 	WWID   string
+	// DevPath names the target by device path instead of selecting it by an
+	// attribute. It exists for a device that HAS no stable attribute to select
+	// on: an md array carries no serial and no WWID, so a selector can never
+	// name one, and Talos consults machine.install.disk only when the selector
+	// is absent entirely.
+	DevPath string
 }
 
-func (r DiskRef) IsZero() bool { return r.Serial == "" && r.WWID == "" }
+func (r DiskRef) IsZero() bool { return r.Serial == "" && r.WWID == "" && r.DevPath == "" }
 
 // Validate refuses a ref that names a disk twice or not at all.
 //
 // `what` is the caller's word for this disk ("install target"), so the refusal
 // reads in the caller's terms rather than this type's.
 func (r DiskRef) Validate(what string) error {
-	if r.Serial != "" && r.WWID != "" {
-		return fmt.Errorf("the %s is named twice — serial %q AND wwid %q — and the two select "+
-			"differently\n\n  keep the one you copied out of this node's disk table and delete the other",
-			what, r.Serial, r.WWID)
+	named := 0
+	for _, v := range []string{r.Serial, r.WWID, r.DevPath} {
+		if v != "" {
+			named++
+		}
+	}
+
+	if named > 1 {
+		return fmt.Errorf("the %s is named more than once — serial %q, wwid %q, devPath %q — and they select "+
+			"differently\n\n  keep the one you copied out of this node's disk table and delete the others",
+			what, r.Serial, r.WWID, r.DevPath)
 	}
 
 	return nil
@@ -280,6 +293,8 @@ func (r DiskRef) Validate(what string) error {
 // it can be matched against a column by eye.
 func (r DiskRef) String() string {
 	switch {
+	case r.DevPath != "":
+		return r.DevPath
 	case r.Serial != "":
 		return fmt.Sprintf("serial %q", r.Serial)
 	case r.WWID != "":

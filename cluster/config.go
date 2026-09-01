@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"strconv"
@@ -141,6 +142,18 @@ type ConfigInput struct {
 	// on a running node, so a value that turns out wrong costs a wipe and a
 	// reinstall — which is why it is an explicit field and not a default.
 	EphemeralMaxSize string
+	// InstallerImage overrides the installer image, which is otherwise pinned
+	// to the ISO's own version. Empty keeps that default.
+	//
+	// A FIRST-CLASS FIELD rather than something a caller patches in, because
+	// machine.install is this generator's own subtree: it sets the disk
+	// selector and the UKI cmdline flag there. A strategic merge over the same
+	// subtree afterwards damages it -- observed emitting "wipe: null" and
+	// producing a node that applies its config, never installs, and never
+	// reboots, with nothing on the console to say why. JSON6902 is not an
+	// escape hatch either: machinery refuses it for multi-document configs,
+	// which any RAIDArrayConfig/UserVolumeConfig setup is.
+	InstallerImage string
 	// DisableKexec asks the node not to kexec when it reboots, via
 	// kernel.kexec_load_disabled. It exists for ONE host platform — QEMU on
 	// macOS, where the kexec path dies in the guest on arm64 — and the caller
@@ -309,7 +322,7 @@ func GenerateConfig(in ConfigInput) (*Generated, error) {
 		generate.WithVersionContract(contract),
 		// Pinned to the IMAGE. Left unset, Talos substitutes the generator's
 		// version and a fresh install silently becomes a cross-version upgrade.
-		generate.WithInstallImage("ghcr.io/siderolabs/installer:" + version),
+		generate.WithInstallImage(cmp.Or(in.InstallerImage, "ghcr.io/siderolabs/installer:"+version)),
 		// A topology correction, not a security weakening: with the
 		// control-plane taint in place a single-node cluster schedules nothing.
 		generate.WithAllowSchedulingOnControlPlanes(true),
@@ -366,8 +379,54 @@ func GenerateConfig(in ConfigInput) (*Generated, error) {
 	// takes a device path, which is exactly the identity we are avoiding.
 	// PatchV1Alpha1 is machinery's own supported way in, and it preserves the
 	// other documents.
+	// UnattendedInstallConfig is a v1alpha1-incompatible way of describing the same thing:
+	// Talos rejects a config that carries both it and machine.install. A patch supplying one
+	// therefore owns the install, and the generated machine.install is dropped.
+	unattended := false
+
+	for _, patch := range in.ConfigPatches {
+		if strings.Contains(patch, "UnattendedInstallConfig") {
+			unattended = true
+
+			break
+		}
+	}
+
 	cfg, err = cfg.PatchV1Alpha1(func(c *v1alpha1.Config) error {
-		c.MachineConfig.MachineInstall.InstallDiskSelector = installDiskSelector(in.SystemDisk)
+		// BOTH ARE OPTIONAL POINTERS. machinery 1.13 always allocates them, but
+		// 1.14 stopped emitting machine.install for a config that names no
+		// install disk, and dereferencing without this is a nil panic INSIDE a
+		// machinery callback -- a segfault with this frame on top and nothing
+		// about the config that caused it.
+		if c.MachineConfig == nil {
+			c.MachineConfig = &v1alpha1.MachineConfig{}
+		}
+
+		if c.MachineConfig.MachineInstall == nil {
+			c.MachineConfig.MachineInstall = &v1alpha1.InstallConfig{}
+		}
+
+		// A selector and a disk are NOT alternatives Talos weighs: it builds its
+		// match expression from the selector whenever one is present and never
+		// looks at `disk`. So naming the target by path means leaving the
+		// selector NIL, not setting both and hoping the more specific one wins.
+		if in.SystemDisk.DevPath != "" {
+			c.MachineConfig.MachineInstall.InstallDisk = in.SystemDisk.DevPath
+			c.MachineConfig.MachineInstall.InstallDiskSelector = nil
+		} else {
+			c.MachineConfig.MachineInstall.InstallDiskSelector = installDiskSelector(in.SystemDisk)
+		}
+
+		// The image is ALSO set here, not only through WithInstallImage above.
+		// On machinery 1.14 that option is accepted and then silently
+		// discarded: it writes into the machine.install the generator no longer
+		// allocates, so the config comes out with no `image:` at all. A caller
+		// pinning a patched installer then boots STOCK Talos, and the only
+		// symptom is a version string nobody thinks to ask for. Setting it on
+		// the struct we have just allocated is the one placement that cannot be
+		// dropped, and it is a no-op when the option did work.
+		c.MachineConfig.MachineInstall.InstallImage = cmp.Or(
+			in.InstallerImage, "ghcr.io/siderolabs/installer:"+version)
 
 		// GATED ON A CONSOLE ARG ACTUALLY BEING PASSED. A 1.12+ contract turns
 		// grubUseUKICmdline ON, which makes GRUB take its cmdline from the
@@ -382,6 +441,11 @@ func GenerateConfig(in ConfigInput) (*Generated, error) {
 		// nothing. Only touched when machinery set it: the field is unknown to
 		// older Talos, and the contract exists to avoid emitting fields a node
 		// cannot parse.
+		if unattended {
+			// dropped LAST, so registries, sysctls and the rest still apply
+			defer func() { c.MachineConfig.MachineInstall = nil }()
+		}
+
 		if in.ConsoleArg != "" && c.MachineConfig.MachineInstall.InstallGrubUseUKICmdline != nil {
 			c.MachineConfig.MachineInstall.InstallGrubUseUKICmdline = new(false)
 		}

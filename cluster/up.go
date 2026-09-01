@@ -115,6 +115,9 @@ type UpOptions struct {
 	// both is refused by the caller that reads them from a manifest, before
 	// anything is dialled.
 	EphemeralMaxSize string
+	// InstallerImage overrides the version-pinned installer image. Empty keeps
+	// the default. See ConfigInput.InstallerImage.
+	InstallerImage string
 
 	// (hasUserVolume below is how the two halves of storage stay in agreement;
 	// see its comment.)
@@ -574,6 +577,7 @@ func configure(ctx context.Context, hooks *upHooks, opts UpOptions, p *printer, 
 		SystemDisk:       opts.SystemDisk,
 		DataDiskSerial:   opts.DataDiskSerial,
 		EphemeralMaxSize: opts.EphemeralMaxSize,
+		InstallerImage:   opts.InstallerImage,
 		// WHETHER kexec is disabled is the CALLER's decision, and the reason
 		// is that it is a fact about the host rather than about the node: the
 		// one substrate it applies to is QEMU on macOS/arm64. See
