@@ -172,6 +172,9 @@ func (r *recorder) hooks() *upHooks {
 		waitNodeReady: func(_ context.Context, kubeconfig []byte, _ time.Duration) error {
 			return r.call("waitNodeReady", kubeconfig)
 		},
+		waitNodeReadyAt: func(_ context.Context, kubeconfig []byte, addr string, _ time.Duration) error {
+			return r.at("waitNodeReadyAt", addr, kubeconfig)
+		},
 		installStorage: func(_ context.Context, kubeconfig []byte) error {
 			return r.call("installStorage", kubeconfig)
 		},
@@ -1900,5 +1903,188 @@ func TestUpAsksForNoMirrorsWhenTheCallerNamedNone(t *testing.T) {
 		t.Errorf("ConfigInput.Registries = %+v, want nil — a mirror nobody asked for is an\n"+
 			"  endpoint nothing is listening on, and every image pull then waits it out",
 			f.rec.input.Registries)
+	}
+}
+
+// fakeJoin is the cluster a joining fixture is pointed at. The values are
+// deliberately distinguishable from the fixture's own KubeEndpoint and from
+// fakeKubeconfig, because most of what these tests assert is that the JOINED
+// cluster's values were used and not the joining machine's.
+const (
+	fakeJoinSecrets    = "cluster: {id: joined}\n"
+	fakeJoinEndpoint   = "https://10.9.9.1:6443"
+	fakeJoinKubeconfig = "apiVersion: v1\nkind: Config\n# the joined cluster's\n"
+)
+
+func joining(f *upFixture) {
+	f.opts.Join = &JoinOptions{
+		SecretsBundle:   []byte(fakeJoinSecrets),
+		ClusterEndpoint: fakeJoinEndpoint,
+		Kubeconfig:      []byte(fakeJoinKubeconfig),
+	}
+}
+
+// THE ONE THAT MATTERS. A joining node's etcd data directory is empty, so it
+// does not refuse a bootstrap the way an already-bootstrapped node does -- it
+// accepts, and forms a second cluster carrying the first one's PKI. Both then
+// look healthy and the two nodes never see each other, so nothing downstream
+// can detect this: the assertion has to live here.
+func TestJoinNeverBootstraps(t *testing.T) {
+	f := newFixture(t)
+	joining(f)
+
+	transcript := f.mustRun(t)
+
+	for _, called := range f.rec.called {
+		if called == "bootstrap" {
+			t.Fatalf("a joining node called bootstrap\n"+
+				"  reason: its etcd is empty, so the call SUCCEEDS and splits the cluster in two "+
+				"-- both halves answer, both look healthy, and the nodes never see each other\n%s",
+				redact(transcript))
+		}
+	}
+
+	wants(t, transcript, "skipped (joining an existing cluster)")
+}
+
+// The bundle is the join. Generating against a fresh one produces a node whose
+// certificates are signed by a CA its peers do not trust, which presents as a
+// node that installs perfectly and then never appears in the cluster.
+func TestJoinGeneratesAgainstTheExistingSecretsBundle(t *testing.T) {
+	f := newFixture(t)
+	joining(f)
+
+	f.mustRun(t)
+
+	if got := string(f.rec.input.SecretsBundle); got != fakeJoinSecrets {
+		t.Errorf("the config was generated against %q, not the joined cluster's secrets bundle\n"+
+			"  reason: a fresh bundle means fresh CAs, and the cluster rejects the node as untrusted\n"+
+			"  want: %q", got, fakeJoinSecrets)
+	}
+}
+
+// Two addresses that must NOT be collapsed: the cluster's API endpoint, and
+// this node's own address. Pointing a joining node's endpoint at itself makes
+// it look for a control plane that does not exist until it has already joined.
+func TestJoinPointsTheEndpointAtTheClusterAndTheCertificateAtTheNode(t *testing.T) {
+	f := newFixture(t)
+	joining(f)
+
+	f.mustRun(t)
+
+	if got := f.rec.input.Endpoint; got != fakeJoinEndpoint {
+		t.Errorf("cluster endpoint is %q, not the joined cluster's %q\n"+
+			"  reason: KubeEndpoint describes the machine being brought up, which is right "+
+			"for the node that IS the cluster and wrong for every node added after it",
+			got, fakeJoinEndpoint)
+	}
+
+	if got := f.rec.input.APIAddress; got == fakeJoinEndpoint {
+		t.Errorf("APIAddress was set to the cluster endpoint %q\n"+
+			"  reason: it is the apid certificate's subject alt name and the talosconfig's "+
+			"endpoint, so it must name THIS node or nothing can dial it directly", got)
+	}
+}
+
+// A join issues no new admin credential. Minting one would succeed -- same CA
+// -- and leave two valid, indistinguishable kubeconfigs for one cluster.
+func TestJoinReusesTheClustersKubeconfigRatherThanMintingOne(t *testing.T) {
+	f := newFixture(t)
+	joining(f)
+
+	f.mustRun(t)
+
+	for _, called := range f.rec.called {
+		if called == "kubeconfig" {
+			t.Errorf("a joining node asked the node for a kubeconfig\n" +
+				"  reason: the cluster already has one; a second is valid, confusing, and " +
+				"rendered against whatever this node believes the endpoint to be")
+		}
+	}
+
+	written, err := os.ReadFile(filepath.Join(f.dir, "kubeconfig"))
+	if err != nil {
+		t.Fatalf("no kubeconfig in the state dir: %v", err)
+	}
+
+	if string(written) != fakeJoinKubeconfig {
+		t.Errorf("state dir kubeconfig is not the joined cluster's\n  got:  %q\n  want: %q",
+			written, fakeJoinKubeconfig)
+	}
+}
+
+// "every node is Ready" is satisfied by the cluster's EXISTING nodes, so a join
+// must wait on the address it just installed or it reports success for a node
+// that has not registered.
+func TestJoinWaitsForTheJoiningNodeSpecifically(t *testing.T) {
+	f := newFixture(t)
+	joining(f)
+
+	f.mustRun(t)
+
+	var sawScoped bool
+
+	for _, called := range f.rec.called {
+		if called == "waitNodeReady" {
+			t.Errorf("a joining node used the every-node-is-Ready wait\n" +
+				"  reason: the existing control plane is already Ready, so it returns before " +
+				"the joining node has registered at all")
+		}
+
+		if called == "waitNodeReadyAt" {
+			sawScoped = true
+		}
+	}
+
+	if !sawScoped {
+		t.Fatal("a joining node never waited for itself to be Ready")
+	}
+}
+
+// A StorageClass is cluster-scoped and the first node installed it.
+func TestJoinDoesNotReinstallClusterStorage(t *testing.T) {
+	f := newFixture(t)
+	joining(f)
+
+	transcript := f.mustRun(t)
+
+	for _, called := range f.rec.called {
+		if called == "installStorage" {
+			t.Errorf("a joining node reinstalled the cluster's storage\n" +
+				"  reason: the StorageClass is cluster-scoped and already exists; re-applying " +
+				"it can re-point the default class at this machine")
+		}
+	}
+
+	wants(t, transcript, "skipped (the cluster this node joined owns its StorageClass)")
+}
+
+// A machine with no Join block must behave exactly as it did before this
+// feature existed -- the regression guard for every test above.
+func TestWithoutJoinTheBringUpStillBootstrapsAndMintsAKubeconfig(t *testing.T) {
+	f := newFixture(t)
+
+	f.mustRun(t)
+
+	var bootstrapped, minted bool
+
+	for _, called := range f.rec.called {
+		switch called {
+		case "bootstrap":
+			bootstrapped = true
+		case "kubeconfig":
+			minted = true
+		}
+	}
+
+	if !bootstrapped || !minted {
+		t.Errorf("a non-joining bring-up changed shape: bootstrapped=%v mintedKubeconfig=%v\n"+
+			"  reason: Join is nil by default and must leave the create path untouched",
+			bootstrapped, minted)
+	}
+
+	if f.rec.input.SecretsBundle != nil {
+		t.Error("a non-joining bring-up was handed a secrets bundle\n" +
+			"  reason: it must mint its own, or every cluster shares one PKI")
 	}
 }

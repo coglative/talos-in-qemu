@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -410,6 +411,14 @@ func adoptMachine(ctx context.Context, d *hvf, path string) error {
 	// is a property of the NODE, and hardware needs one for the same reason a
 	// VM does. Refused here, before the maintenance wait, for the same reason
 	// the network block above is.
+	// Resolved HERE, with the other refusals that are provable from the file:
+	// a join names another machine's state directory, and whether that
+	// directory holds a cluster is knowable without dialling anything.
+	join, err := joinOptions(d, m)
+	if err != nil {
+		return err
+	}
+
 	mirrors, err := registryMirrors(m)
 	if err != nil {
 		return err
@@ -555,6 +564,8 @@ func adoptMachine(ctx context.Context, d *hvf, path string) error {
 		TalosVersion:     version,
 		VersionSource:    source,
 		Substrate:        fmt.Sprintf("baremetal, %s", str(spec["maintenanceEndpoint"], "")),
+		// nil unless spec.baremetal.joins named a cluster. See joinOptions.
+		Join: join,
 		// EMPTY BY DEFAULT. Real hardware has a firmware-configured console and
 		// usually a display; a console argument derived from THIS host's
 		// architecture is a guess, and a wrong one is silent at exactly the
@@ -576,4 +587,67 @@ func adoptMachine(ctx context.Context, d *hvf, path string) error {
 		// handle on it.
 		Boot: func() (int, error) { return 0, nil },
 	})
+}
+
+// joinOptions resolves spec.joins into the cluster a machine is joining, or nil
+// when the field is absent and this machine creates its own cluster.
+//
+// RESOLVED FROM THE STATE DIR OF ANOTHER MACHINE, and it names that machine
+// rather than restating its secrets and endpoint, because those are not facts
+// an operator should be retyping: the bundle is 8 KB of PKI and the endpoint
+// has to match the one already burned into the cluster's certificates. Naming
+// the machine makes both derivable and keeps exactly one copy of each.
+//
+// Every refusal here is provable FROM THE FILE and happens before anything is
+// dialled — the same rule the endpoint and network checks above follow, and for
+// the same reason: reaching one of these after the maintenance wait costs ten
+// minutes for a verdict the manifest already contained.
+func joinOptions(h *hvf, m *unstructured.Unstructured) (*cluster.JoinOptions, error) {
+	target := str(baremetalFields(m)["joins"], "")
+	if target == "" {
+		return nil, nil
+	}
+
+	if target == m.GetName() {
+		return nil, fmt.Errorf("spec.baremetal.joins names %q, which is this machine\n\n"+
+			"  a machine cannot join the cluster it is creating; drop the field to create one",
+			target)
+	}
+
+	// The SAME derivation cmd/tinq uses for this machine's own directory, so a
+	// name that works as metadata.name resolves here too. Sharing the site is
+	// required rather than assumed: the state root is keyed by site first, and
+	// a cluster whose nodes are filed under different sites is one that
+	// `destroy` cannot sweep.
+	dir := filepath.Join(h.stateRoot, driverkit.Str(m, "spec", "site"),
+		fmt.Sprintf("bootstrap-%s-%s", m.GetNamespace(), target))
+
+	secrets, err := os.ReadFile(filepath.Join(dir, "secrets.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("spec.baremetal.joins names %q, but its cluster secrets are not "+
+			"readable at %s: %w\n\n"+
+			"  that file is the cluster: its CAs and machine token are what make this node's\n"+
+			"  certificates trusted by its peers. Without it a join is not possible, and\n"+
+			"  generating fresh secrets would silently build a SECOND cluster instead.\n\n"+
+			"  bring %s up first, or restore its state directory", target, dir, err, target)
+	}
+
+	kubeconfig, err := os.ReadFile(filepath.Join(dir, "kubeconfig"))
+	if err != nil {
+		return nil, fmt.Errorf("spec.baremetal.joins names %q, but its kubeconfig is not "+
+			"readable at %s: %w\n\n"+
+			"  it is where the cluster's API endpoint and this run's readiness check come from",
+			target, dir, err)
+	}
+
+	endpoint, err := cluster.EndpointFromKubeconfig(kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("reading the API endpoint from %s's kubeconfig: %w", target, err)
+	}
+
+	return &cluster.JoinOptions{
+		SecretsBundle:   secrets,
+		ClusterEndpoint: endpoint,
+		Kubeconfig:      kubeconfig,
+	}, nil
 }

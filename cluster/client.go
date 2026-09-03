@@ -475,3 +475,113 @@ func waitFor(ctx context.Context, timeout time.Duration, what string, probe func
 		}
 	}
 }
+
+// WaitNodeReadyAt waits for the node carrying `addr` to report Ready.
+//
+// SEPARATE FROM WaitNodeReady, and not a refinement of it: the two answer
+// different questions and the difference is load-bearing on a join.
+// WaitNodeReady asks "is every node Ready", which is the right question for a
+// cluster being created — there is exactly one node and it is the one we just
+// built. Asked on a JOIN it is not merely imprecise, it is satisfied by the
+// wrong node: the existing control plane is already Ready, the joining node has
+// not registered yet, so "every node is Ready" is TRUE and the wait returns
+// before the machine this run exists to add has appeared at all. The bring-up
+// then reports success for a node that may still be installing.
+//
+// Matched on ADDRESS rather than name because that is what the caller knows.
+// A node's Kubernetes name is its hostname, which on this path is handed out by
+// DHCP and adopted by the node — tinq never sees it. The address is the one
+// identity the caller supplied and the certificate was issued for.
+func WaitNodeReadyAt(ctx context.Context, kubeconfig []byte, addr string, timeout time.Duration) error {
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return errSecretParse("kubeconfig")
+	}
+
+	nodes, err := corev1client.NewForConfig(restConfig)
+	if err != nil {
+		return fmt.Errorf("building a Kubernetes client: %w", err)
+	}
+
+	return waitFor(ctx, timeout, fmt.Sprintf("the node at %s to be Ready", addr), func(ctx context.Context) error {
+		list, err := nodes.Nodes().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+
+		for i := range list.Items {
+			node := &list.Items[i]
+
+			if !nodeHasAddress(node, addr) {
+				continue
+			}
+
+			if !nodeIsReady(node) {
+				return fmt.Errorf("node %q (%s) is not Ready yet", node.Name, addr)
+			}
+
+			return nil
+		}
+
+		// NOT AN ERROR STATE, just an early one: kubelet registers the node
+		// some seconds after apid starts answering, so "not there yet" is the
+		// normal first answer and the message says which address is missing
+		// rather than how many nodes were seen.
+		return fmt.Errorf("no node with address %s has registered yet", addr)
+	})
+}
+
+// nodeHasAddress reports whether any of the node's addresses equals addr.
+//
+// Every address type is considered, not InternalIP alone: which type a given
+// address lands under is decided by the kubelet's cloud provider and node-ip
+// settings, and on bare metal with no provider the same address can appear as
+// InternalIP on one node and be duplicated into Hostname on another. Comparing
+// all of them cannot produce a false positive here, because the caller's addr
+// is the address it just installed and dialled.
+func nodeHasAddress(node *corev1.Node, addr string) bool {
+	for _, a := range node.Status.Addresses {
+		if a.Address == addr {
+			return true
+		}
+	}
+
+	return false
+}
+
+// EndpointFromKubeconfig reads the API server URL out of a kubeconfig.
+//
+// The joined cluster's endpoint is DERIVED rather than asked for, because the
+// two would be free to disagree: a manifest naming an endpoint that is not the
+// one in the kubeconfig beside it produces a node pointed at a cluster whose
+// credentials it does not hold, and the failure surfaces as a TLS error with
+// nothing pointing at the field that caused it. The kubeconfig is already the
+// thing that has to be right.
+func EndpointFromKubeconfig(kubeconfig []byte) (string, error) {
+	cfg, err := clientcmd.Load(kubeconfig)
+	if err != nil {
+		return "", errSecretParse("kubeconfig")
+	}
+
+	// The CURRENT context's cluster, not the only one: a kubeconfig may carry
+	// several, and picking by iteration order would choose a different cluster
+	// on a different day.
+	context, ok := cfg.Contexts[cfg.CurrentContext]
+	if !ok {
+		return "", fmt.Errorf("the kubeconfig names no current context, so which of its "+
+			"%d clusters this node should join cannot be decided", len(cfg.Clusters))
+	}
+
+	entry, ok := cfg.Clusters[context.Cluster]
+	if !ok {
+		return "", fmt.Errorf("the kubeconfig's current context names cluster %q, which it "+
+			"does not define", context.Cluster)
+	}
+
+	if entry.Server == "" {
+		return "", errors.New("the kubeconfig's cluster has no server address, so there is " +
+			"nothing for a joining node to point at")
+	}
+
+	return entry.Server, nil
+}

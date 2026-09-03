@@ -164,6 +164,15 @@ type UpOptions struct {
 	// patch that does not parse or apply is refused at generation, not here.
 	ConfigPatches []string
 
+	// Join makes this a machine that JOINS an existing cluster rather than
+	// creating one. nil is the default and means create.
+	//
+	// It is one nilable struct rather than three optional fields because the
+	// three are meaningless apart: a secrets bundle without the endpoint it was
+	// issued for describes no cluster, and either one without the other is a
+	// half-join discovered at the worst possible moment.
+	Join *JoinOptions
+
 	// Boot starts the VM, or adopts one already running, and returns its pid.
 	// Owned by package main: this package knows nothing about qemu.
 	Boot func() (int, error)
@@ -199,6 +208,7 @@ type upHooks struct {
 	waitMaintenance    func(ctx context.Context, endpoint string, timeout time.Duration) error
 	applyConfig        func(ctx context.Context, endpoint string, config []byte) error
 	waitBootstrapReady func(ctx context.Context, talosconfig []byte, endpoint string, timeout time.Duration) error
+	waitNodeReadyAt    func(ctx context.Context, kubeconfig []byte, addr string, timeout time.Duration) error
 	bootstrap          func(ctx context.Context, talosconfig []byte, endpoint string) error
 	kubeconfig         func(ctx context.Context, talosconfig []byte, endpoint string) ([]byte, error)
 	waitNodeReady      func(ctx context.Context, kubeconfig []byte, timeout time.Duration) error
@@ -211,11 +221,46 @@ func realHooks() *upHooks {
 		waitMaintenance:    WaitMaintenance,
 		applyConfig:        applyConfiguration,
 		waitBootstrapReady: WaitBootstrapReady,
+		waitNodeReadyAt:    WaitNodeReadyAt,
 		bootstrap:          bootstrapEtcd,
 		kubeconfig:         fetchKubeconfig,
 		waitNodeReady:      WaitNodeReady,
 		installStorage:     InstallStorage,
 	}
+}
+
+// JoinOptions describes the cluster a machine is joining.
+//
+// WHY JOINING IS NOT "CREATE WITH DIFFERENT INPUTS", and why this is a type
+// rather than a bool: a second machine handed a FRESH secrets bundle does not
+// fail. It builds a SECOND cluster, with its own CAs, that looks entirely
+// healthy from the inside -- one node, Ready, answering a kubeconfig. Nothing
+// downstream can tell the two apart, and the operator finds out when a workload
+// cannot see a peer that was supposed to be in the same cluster. Carrying the
+// existing PKI is the whole feature, not a parameter of it.
+type JoinOptions struct {
+	// SecretsBundle is the EXISTING cluster's secrets.yaml. It carries the
+	// Kubernetes, etcd, Talos and aggregator CAs and the machine token; a node
+	// configured from anything else is rejected by its peers as signed by a CA
+	// they do not trust.
+	SecretsBundle []byte
+
+	// ClusterEndpoint is the Kubernetes API endpoint of the cluster being
+	// joined, e.g. https://10.0.0.5:6443. It becomes the joining node's
+	// cluster.controlPlane.endpoint.
+	//
+	// DISTINCT FROM THE NODE'S OWN ADDRESS, which stays the joining machine's:
+	// the endpoint says where the CLUSTER's API lives, while the certificate
+	// and the talosconfig must name THIS node or nothing can dial it directly.
+	// Collapsing the two points every joining node at itself, and it never
+	// finds the cluster.
+	ClusterEndpoint string
+
+	// Kubeconfig is the joined cluster's admin kubeconfig, reused rather than
+	// minted. Minting a second one would succeed -- same CA -- and produce a
+	// credential that is valid, confusing, and pointed wherever the new node
+	// happened to render it.
+	Kubeconfig []byte
 }
 
 // Up turns a maintenance-mode Talos node and a state directory into a working
@@ -478,6 +523,27 @@ func Up(ctx context.Context, opts UpOptions) error {
 	// in step 9 forever, against a node that can never report Ready. Asking the
 	// node instead, and accepting its refusal, collapses both cases into one
 	// path with no extra probe and nothing to keep in step.
+	// NEVER BOOTSTRAP A JOINING NODE. This is the one step where being wrong is
+	// silent and unrecoverable: a fresh node's etcd data directory is empty, so
+	// it does not refuse a bootstrap the way an already-bootstrapped node does
+	// -- it ACCEPTS, and forms a second single-node cluster carrying the PKI of
+	// the first. Both clusters then answer, both look healthy, and the only
+	// symptom is that the two nodes never see each other. A control-plane node
+	// joins by having the cluster's PKI and endpoint and being started; there is
+	// no join RPC to call in its place.
+	//
+	// Written as a branch around the call rather than a case inside the switch
+	// below, because a switch would EVALUATE hooks.bootstrap to select on its
+	// error -- performing the exact call this guard exists to prevent.
+	if opts.Join != nil {
+		p.step("bootstrap", "skipped (joining an existing cluster)")
+		p.detail("etcd is bootstrapped ONCE per cluster, by its first node. A second")
+		p.detail("bootstrap here would NOT be refused -- this node's etcd is empty, so it")
+		p.detail("would succeed and split the cluster in two")
+
+		return joined(ctx, hooks, opts, p, installedAddr)
+	}
+
 	switch err := hooks.bootstrap(ctx, talosconfig, installed); {
 	case err == nil:
 		p.step("bootstrap", "etcd bootstrapped")
@@ -565,10 +631,29 @@ func Up(ctx context.Context, opts UpOptions) error {
 // because the caller is what knows they leave a VM behind.
 func configure(ctx context.Context, hooks *upHooks, opts UpOptions, p *printer, installedAddr, installed string) ([]byte, error) {
 	// ── 6/10 config ─────────────────────────────────────────────────────────
+	// THE CLUSTER'S ENDPOINT, NOT THIS NODE'S, when joining. KubeEndpoint is
+	// derived from the machine being brought up, which is right for the node
+	// that IS the cluster and wrong for every node added after it: a joining
+	// node pointed at itself looks for a control plane that will not exist
+	// until it has already joined one.
+	endpoint := opts.KubeEndpoint
+	// The existing PKI, when there is one. Empty for a create, and
+	// GenerateConfig mints a fresh bundle exactly as before.
+	var secrets []byte
+
+	if opts.Join != nil {
+		endpoint = opts.Join.ClusterEndpoint
+		secrets = opts.Join.SecretsBundle
+	}
+
 	generated, err := hooks.generateConfig(ConfigInput{
-		ClusterName:      opts.ClusterName,
-		Endpoint:         opts.KubeEndpoint,
+		ClusterName: opts.ClusterName,
+		Endpoint:    endpoint,
+		// STILL THIS NODE'S ADDRESS on a join: it is the apid certificate's
+		// subject alt name and the talosconfig's endpoint, so it must name the
+		// machine a client dials, never the cluster it belongs to.
 		APIAddress:       installedAddr,
+		SecretsBundle:    secrets,
 		TalosVersion:     opts.TalosVersion,
 		ConsoleArg:       opts.ConsoleArg,
 		SystemDisk:       opts.SystemDisk,
@@ -1071,4 +1156,46 @@ func fetchKubeconfig(ctx context.Context, talosconfig []byte, endpoint string) (
 	}
 
 	return kubeconfig, nil
+}
+
+// joined finishes a bring-up that JOINED a cluster, replacing steps 9 and 10.
+//
+// It is a tail rather than a set of conditionals threaded through Up because
+// what it skips is not incidental: a join mints no kubeconfig, installs no
+// storage class, and cannot use the "every node is Ready" wait. Expressed as
+// three `if opts.Join != nil` branches inside Up, the shape of a join would be
+// something a reader has to reconstruct from the exceptions.
+func joined(ctx context.Context, hooks *upHooks, opts UpOptions, p *printer, installedAddr string) error {
+	started := time.Now()
+
+	// ── 9/10 kubeconfig ─────────────────────────────────────────────────────
+	//
+	// REUSED, NOT MINTED. Asking this node for a kubeconfig would succeed --
+	// it holds the cluster's CA -- and hand back a second admin credential
+	// that is valid, indistinguishable from the first, and rendered against
+	// whatever this node believes the endpoint to be. The cluster already has
+	// one; a join is not the moment to issue another.
+	if err := writeArtifacts(opts.StateDir, map[string][]byte{
+		"kubeconfig": opts.Join.Kubeconfig,
+	}); err != nil {
+		return err
+	}
+
+	// THIS node, by address. See WaitNodeReadyAt: the "every node is Ready"
+	// wait is satisfied by the cluster's EXISTING nodes and would return before
+	// this machine had registered at all.
+	if err := hooks.waitNodeReadyAt(ctx, opts.Join.Kubeconfig, installedAddr, nodeReadyTimeout); err != nil {
+		return err
+	}
+
+	p.step("kubeconfig", "wrote the cluster's kubeconfig, node %s Ready after %s", installedAddr, took(started))
+
+	// ── 10/10 storage ───────────────────────────────────────────────────────
+	//
+	// The cluster's, not the node's: a StorageClass is a cluster-scoped object
+	// that the first node already installed. Re-applying it here would at best
+	// be a no-op and at worst re-point the default class at this machine.
+	p.step("storage", "skipped (the cluster this node joined owns its StorageClass)")
+
+	return nil
 }

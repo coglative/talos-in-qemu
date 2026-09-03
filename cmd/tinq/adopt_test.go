@@ -841,3 +841,68 @@ spec:
 		t.Errorf("adopt did not reach the authenticated call; it failed earlier with:\n%s", err)
 	}
 }
+
+// A join that names a machine with no cluster behind it must be refused FROM
+// THE FILE. Generating fresh secrets instead is the silent failure this whole
+// feature exists to prevent: the node installs, reports Ready, and is a second
+// cluster of one.
+func TestAdoptRefusesAJoinWhoseClusterHasNoSecrets(t *testing.T) {
+	err := adoptRefusalFromTheFile(t, `    maintenanceEndpoint: 192.168.1.50
+    systemDiskSerial: S1
+    joins: nosuchmachine
+`)
+
+	for _, want := range []string{"nosuchmachine", "secrets"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q\n"+
+				"  reason: it has to name the machine that was expected to own the cluster, "+
+				"and what was missing\n  got: %v", want, err)
+		}
+	}
+}
+
+// Naming yourself is a manifest typo, not a request. Left unchecked it resolves
+// to this machine's own state directory, which on a first run is empty and
+// therefore indistinguishable from the case above.
+func TestAdoptRefusesAMachineThatJoinsItself(t *testing.T) {
+	err := adoptRefusalFromTheFile(t, `    maintenanceEndpoint: 192.168.1.50
+    systemDiskSerial: S1
+    joins: bm0
+`)
+
+	if !strings.Contains(err.Error(), "this machine") {
+		t.Errorf("a machine joining itself was not named as such\n  got: %v", err)
+	}
+}
+
+// The default path must be untouched: no joins field means no join, and
+// joinOptions must not invent one.
+func TestNoJoinsFieldMeansNoJoin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "machine.yaml")
+	if err := os.WriteFile(path, []byte(`apiVersion: machine.hvf.fleet.io/v1alpha1
+kind: TalosMachine
+metadata: {name: bm0, namespace: default}
+spec:
+  site: lab
+  baremetal:
+    maintenanceEndpoint: 192.168.1.50
+    systemDiskSerial: S1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := readMachine(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	join, err := joinOptions(&hvf{stateRoot: t.TempDir()}, m)
+	if err != nil {
+		t.Fatalf("a machine with no joins field was refused: %v", err)
+	}
+
+	if join != nil {
+		t.Error("a machine with no joins field resolved a cluster to join\n" +
+			"  reason: nil is what keeps every existing manifest creating its own cluster")
+	}
+}

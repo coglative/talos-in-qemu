@@ -131,6 +131,21 @@ spec:
                     machine that has it, and `tinq adopt` requires it. Nothing here
                     powers a node on — it must already be in maintenance mode.
                   properties:
+                    joins:
+                      type: string
+                      # minLength for the same reason maintenanceEndpoint has one:
+                      # `joins: ""` would satisfy key presence and then read as
+                      # "no join", which is the opposite of what writing the field
+                      # says. A field that is present must mean something.
+                      minLength: 1
+                      description: >-
+                        The metadata.name of the machine whose cluster this one JOINS,
+                        instead of creating its own. Its state directory supplies the
+                        cluster's secrets bundle and kubeconfig, so the PKI and the API
+                        endpoint are derived rather than restated -- and a joining node
+                        never bootstraps etcd. Absent means this machine creates a
+                        cluster, which is what every manifest written before this field
+                        existed continues to do.
                     maintenanceEndpoint:
                       type: string
                       # minLength CARRIES THE WEIGHT `required` LOOKS LIKE IT DOES.
