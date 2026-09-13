@@ -1153,6 +1153,29 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 		// it removes reads like a hang anywhere else — the API never opens, so
 		// there is no node to ask.
 		"-device", "virtio-rng-pci",
+		// THE GUEST GIVES MEMORY BACK, or one node's venues OOM the handler that hosts them.
+		//
+		// `-m` is a CEILING the guest grows into and never returns from. Measured 2026-09-13 on
+		// r3k1n7: two venues at `-m 6144` held RSS 5,347,540 kB and 5,234,420 kB -- nearly the
+		// whole allocation each, mostly guest page cache that nothing needs back badly enough to
+		// evict. Ten such venues on one node is ~53GB against the tinq handler's 24Gi cgroup
+		// limit, so the handler was OOMKilled: 191 restarts over six days, every venue on the node
+		// cycling with it. A venue that flaps cannot serve an integration tier, which is why
+		// `a2a_live_conformance_test` had never once found a substrate.
+		//
+		// virtio-balloon lets the host reclaim what the guest is not using. It does not lower the
+		// ceiling -- a venue under real load still reaches 6GiB -- it removes the ratchet, so an
+		// IDLE venue stops costing what a busy one does. That distinction is the point: the fleet
+		// runs many venues and works perhaps one at a time.
+		//
+		// NOT deflate-on-oom: that lets a guest under memory pressure take memory BACK from the
+		// host, which is the opposite of the property wanted here. The host is the constrained
+		// party; a guest that cannot get memory should fail in its own cgroup rather than push the
+		// handler into one.
+		//
+		// Talos ships the virtio_balloon driver, so no guest-side change is needed. A guest that
+		// lacks it simply never inflates, which degrades to today's behaviour rather than failing.
+		"-device", "virtio-balloon-pci",
 		"-display", "none",
 		"-serial", "file:" + filepath.Join(dir, "serial.log"),
 		"-pidfile", filepath.Join(dir, "qemu.pid"),

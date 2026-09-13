@@ -485,6 +485,9 @@ func TestCreateQEMUArgs(t *testing.T) {
 				// past the maintenance budget waiting on the CRNG. Asserted
 				// because it is invisible until a bring-up fails as a hang.
 				"-device", "virtio-rng-pci",
+				// Reclaims what an idle guest is not using, so many venues on one node stop
+				// summing to their ceilings. Rationale in main.go.
+				"-device", "virtio-balloon-pci",
 				"-display", "none",
 				"-serial", "file:" + filepath.Join(dir, "serial.log"),
 				"-pidfile", filepath.Join(dir, "qemu.pid"),
