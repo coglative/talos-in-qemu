@@ -17,6 +17,7 @@ package driverkit
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -264,6 +265,15 @@ func reconcile(ctx context.Context, dc dynamic.Interface, cfg Config, d Driver, 
 		return err // re-read next tick
 	}
 
+	// A machine that names a Secret must not be touched without it: generating a config from a
+	// fresh CA instead is a different site wearing this one's name.
+	if ref, ok, _ := unstructured.NestedStringMap(m.Object, "spec", "secretRef"); ok {
+		data, err := readSecret(ctx, dc, ref["namespace"], ref["name"])
+		if err != nil {
+			return fmt.Errorf("spec.secretRef %s/%s: %w", ref["namespace"], ref["name"], err)
+		}
+		ctx = WithSecret(ctx, data)
+	}
 	state, st, err := d.Observe(ctx, m)
 	if err != nil {
 		return fmt.Errorf("observe: %w", err)
@@ -410,4 +420,39 @@ func Kubeconfig() {
 func Str(m *unstructured.Unstructured, path ...string) string {
 	v, _, _ := unstructured.NestedString(m.Object, path...)
 	return v
+}
+
+type secretKey struct{}
+
+// WithSecret carries a machine's referenced Secret to the driver for this reconcile only; it is
+// never written back to the object.
+func WithSecret(ctx context.Context, data map[string][]byte) context.Context {
+	return context.WithValue(ctx, secretKey{}, data)
+}
+
+// SecretFrom returns the Secret a machine's spec.secretRef names, if it names one.
+func SecretFrom(ctx context.Context) (map[string][]byte, bool) {
+	d, ok := ctx.Value(secretKey{}).(map[string][]byte)
+	return d, ok
+}
+
+func readSecret(ctx context.Context, dc dynamic.Interface, namespace, name string) (map[string][]byte, error) {
+	if namespace == "" || name == "" {
+		return nil, fmt.Errorf("want namespace and name")
+	}
+	u, err := dc.Resource(schema.GroupVersionResource{Version: "v1", Resource: "secrets"}).
+		Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	raw, _, _ := unstructured.NestedStringMap(u.Object, "data")
+	out := make(map[string][]byte, len(raw))
+	for k, v := range raw {
+		b, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, fmt.Errorf("key %s: %w", k, err)
+		}
+		out[k] = b
+	}
+	return out, nil
 }

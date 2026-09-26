@@ -558,6 +558,12 @@ func bringUp(ctx context.Context, d *hvf, m *unstructured.Unstructured, state dr
 	if err != nil {
 		return err
 	}
+	if sec, ok := driverkit.SecretFrom(ctx); ok {
+		if opts.SecretsBundle = sec["bundle.yaml"]; len(opts.SecretsBundle) == 0 {
+			return fmt.Errorf("spec.secretRef names a Secret with no bundle.yaml")
+		}
+		opts.SecretPatches = splitPatches(sec["patches.yaml"])
+	}
 	return cluster.Up(ctx, opts)
 }
 
@@ -1567,4 +1573,15 @@ func netdevArg(m *unstructured.Unstructured) string {
 func advertiseName(m *unstructured.Unstructured) string {
 	v, _, _ := unstructured.NestedString(m.Object, "spec", "advertiseName")
 	return v
+}
+
+// splitPatches reads a Secret's patches.yaml: YAML documents separated by "---", each one patch.
+func splitPatches(b []byte) []string {
+	var out []string
+	for _, doc := range strings.Split(string(b), "\n---\n") {
+		if strings.TrimSpace(doc) != "" {
+			out = append(out, doc)
+		}
+	}
+	return out
 }

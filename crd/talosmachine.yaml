@@ -397,6 +397,17 @@ spec:
                       caFile:
                         type: string
                         description: Path (on the host running tinq) to a PEM CA bundle.
+                secretRef:
+                  type: object
+                  description: >-
+                    A Secret holding bundle.yaml (the site's own Talos secrets bundle, so its CA
+                    and lineage exist before boot) and optional patches.yaml (config patches that
+                    carry key material, applied after configPatches). A machine that names one is
+                    not touched until it can be read.
+                  required: [namespace, name]
+                  properties:
+                    namespace: {type: string}
+                    name: {type: string}
                 configPatches:
                   type: array
                   description: >-

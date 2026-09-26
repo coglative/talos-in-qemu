@@ -171,6 +171,13 @@ type UpOptions struct {
 	// generated — see ConfigInput.ConfigPatches. Carried through unchanged; a
 	// patch that does not parse or apply is refused at generation, not here.
 	ConfigPatches []string
+	// SecretsBundle is the site's own secrets.yaml, or nil to mint one. A site that owns its CA
+	// (coglative-mesh #451) knows its lineage before boot and restores with the same identity.
+	// SECRET: never logged, never placed in an error.
+	SecretsBundle []byte
+	// SecretPatches are applied after ConfigPatches. They carry key material (a WireGuard private
+	// key), so they come from a Secret rather than from the machine's spec.
+	SecretPatches []string
 
 	// Boot starts the VM, or adopts one already running, and returns its pid.
 	// Owned by package main: this package knows nothing about qemu.
@@ -633,7 +640,8 @@ func configure(ctx context.Context, hooks *upHooks, opts UpOptions, p *printer, 
 		// the failure is an image that exists ONLY on the mirror, days later,
 		// in another repository's deploy.
 		Registries:    opts.Registries,
-		ConfigPatches: opts.ConfigPatches,
+		ConfigPatches: append(append([]string(nil), opts.ConfigPatches...), opts.SecretPatches...),
+		SecretsBundle: opts.SecretsBundle,
 	})
 	if err != nil {
 		return nil, err

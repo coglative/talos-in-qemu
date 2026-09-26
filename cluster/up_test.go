@@ -1902,3 +1902,23 @@ func TestUpAsksForNoMirrorsWhenTheCallerNamedNone(t *testing.T) {
 			f.rec.input.Registries)
 	}
 }
+
+// A site that owns its CA hands Up its bundle and its key-bearing patches; generation must receive
+// the bundle, and the secret patches must apply after the public ones so they win.
+func TestUpGeneratesFromTheSitesBundleAndAppliesSecretPatchesLast(t *testing.T) {
+	f := newFixture(t)
+	f.opts.TalosVersion = imageTalosVersion
+	f.opts.ConfigPatches = []string{"public"}
+	f.opts.SecretsBundle = []byte("bundle-bytes")
+	f.opts.SecretPatches = []string{"secret"}
+
+	f.mustRun(t)
+
+	in := f.rec.input
+	if string(in.SecretsBundle) != "bundle-bytes" {
+		t.Errorf("generation did not receive the site's bundle; a fresh CA is a different site")
+	}
+	if len(in.ConfigPatches) != 2 || in.ConfigPatches[0] != "public" || in.ConfigPatches[1] != "secret" {
+		t.Errorf("patches %q, want the public one then the secret one", in.ConfigPatches)
+	}
+}
