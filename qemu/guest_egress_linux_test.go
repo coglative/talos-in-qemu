@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -19,6 +20,14 @@ import (
 
 // The probe is this test binary re-run as another uid: it sends one datagram and exits 0 on a reply.
 func TestMain(m *testing.M) {
+	if a := os.Getenv("TINQ_EGRESS_PROBE_TCP"); a != "" {
+		c, err := net.DialTimeout("tcp", a, 2*time.Second)
+		if err != nil {
+			os.Exit(1)
+		}
+		c.Close()
+		os.Exit(0)
+	}
 	if a := os.Getenv("TINQ_EGRESS_PROBE"); a != "" {
 		c, err := net.DialTimeout("udp", a, time.Second)
 		if err != nil {
@@ -88,10 +97,15 @@ func echoOn(t *testing.T, addr string) {
 	}()
 }
 
-// probe runs the probe as uid (0 is root) from the calling thread's namespace.
+// probe runs the probe as uid (0 is root) from the calling thread's namespace. An address
+// prefixed "tcp:" is a TCP connect; anything else is a UDP echo.
 func probe(uid uint32, addr string) bool {
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	cmd.Env = append(os.Environ(), "TINQ_EGRESS_PROBE="+addr)
+	if a, ok := strings.CutPrefix(addr, "tcp:"); ok {
+		cmd.Env = append(os.Environ(), "TINQ_EGRESS_PROBE_TCP="+a)
+	} else {
+		cmd.Env = append(os.Environ(), "TINQ_EGRESS_PROBE="+addr)
+	}
 	if uid != 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid}}
 	}
@@ -125,11 +139,14 @@ func TestGuestUIDReachesOnlyTheAllowListDNSAndLoopback(t *testing.T) {
 		up(t, "h0", "fd00:98::1/64")
 		up(t, "lo", "127.0.0.1/8")
 		echoOn(t, "127.0.0.1:7")
+		listenTCP(t, "127.0.0.1:443")
+		listenTCP(t, "127.0.0.1:444")
 	})
 	inNS(t, outside, func() {
 		up(t, "o0", "fd00:98::2/64", "fd00:98::5/128", "fd00:98::6/128", "fd00:98::53/128", "fd00:98::7/128")
 		echoOn(t, "[fd00:98::5]:7")
 		echoOn(t, "[fd00:98::6]:7")
+		echoOn(t, "[fd00:98::6]:8")
 		echoOn(t, "[fd00:98::53]:53")
 		echoOn(t, "[fd00:98::7]:7")
 	})
@@ -139,8 +156,10 @@ func TestGuestUIDReachesOnlyTheAllowListDNSAndLoopback(t *testing.T) {
 		if !probe(0, "[fd00:98::6]:7") {
 			t.Fatal("control: root cannot reach the outside before any rule exists")
 		}
-		g := &guestEgress{UID: 64000, Allow: []netip.Prefix{netip.MustParsePrefix("fd00:98::6/128")},
-			DNS: []netip.Addr{netip.MustParseAddr("fd00:98::53")}}
+		a, err := parseAllow("fd00:98::6/128@udp:7")
+		ok(t, err)
+		g := &guestEgress{UID: 64000, Allow: []allow{a},
+			DNS: []netip.Addr{netip.MustParseAddr("fd00:98::53")}, Loopback: [][2]uint16{{443, 443}}}
 		ok(t, g.install())
 	})
 	inNS(t, handler, func() {
@@ -154,7 +173,10 @@ func TestGuestUIDReachesOnlyTheAllowListDNSAndLoopback(t *testing.T) {
 			{64000, "[fd00:98::5]:7", false, "a destination outside the allow-list"},
 			{64000, "[fd00:98::53]:53", true, "DNS"},
 			{64000, "[fd00:98::53]:7", false, "the DNS server on another port"},
-			{64000, "127.0.0.1:7", true, "loopback"},
+			{64000, "[fd00:98::6]:8", false, "the allowed destination on another port"},
+			{64000, "tcp:127.0.0.1:443", true, "the one loopback port named"},
+			{64000, "tcp:127.0.0.1:444", false, "a loopback port not named (another venue's forward)"},
+			{64000, "127.0.0.1:7", false, "loopback UDP"},
 			{0, "[fd00:98::5]:7", true, "the controller, which is not confined"},
 			{0, "[fd00:98::7]:7", true, "a neighbour nothing has resolved yet"},
 		} {
@@ -163,4 +185,20 @@ func TestGuestUIDReachesOnlyTheAllowListDNSAndLoopback(t *testing.T) {
 			}
 		}
 	})
+}
+
+func listenTCP(t *testing.T, addr string) {
+	t.Helper()
+	l, err := net.Listen("tcp", addr)
+	ok(t, err)
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
 }

@@ -47,21 +47,27 @@ func (g *guestEgress) install() error {
 	rule(&expr.Ct{Register: 1, Key: expr.CtKeySTATE},
 		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: le32(expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED), Xor: make([]byte, 4)},
 		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: make([]byte, 4)}, acceptV)
-	rule(&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname("lo")}, acceptV)
+	for _, r := range g.Loopback {
+		rule(append([]expr.Any{&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname("lo")}}, append(dport(unix.IPPROTO_TCP, r), acceptV)...)...)
+	}
 	for _, d := range g.DNS {
 		for _, proto := range []byte{unix.IPPROTO_UDP, unix.IPPROTO_TCP} {
-			e := daddr(netip.PrefixFrom(d, d.BitLen()))
-			e = append(e,
-				&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
-				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
-				&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
-				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0, 53}}, acceptV)
-			rule(e...)
+			rule(append(append(daddr(netip.PrefixFrom(d, d.BitLen())), dport(proto, [2]uint16{53, 53})...), acceptV)...)
 		}
 	}
-	for _, p := range g.Allow {
-		rule(append(daddr(p), acceptV)...)
+	for _, a := range g.Allow {
+		if a.Proto == "" {
+			rule(append(daddr(a.Prefix), acceptV)...)
+			continue
+		}
+		proto := byte(unix.IPPROTO_TCP)
+		if a.Proto == "udp" {
+			proto = unix.IPPROTO_UDP
+		}
+		for _, r := range a.Ports {
+			rule(append(append(daddr(a.Prefix), dport(proto, r)...), acceptV)...)
+		}
 	}
 	rule(&expr.Verdict{Kind: expr.VerdictDrop})
 	return c.Flush()
@@ -83,6 +89,17 @@ func daddr(p netip.Prefix) []expr.Any {
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: off, Len: uint32(n)},
 		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: uint32(n), Mask: mask, Xor: make([]byte, n)},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: p.Masked().Addr().AsSlice()},
+	}
+}
+
+// dport matches a transport protocol and a destination port range.
+func dport(proto byte, r [2]uint16) []expr.Any {
+	be := func(p uint16) []byte { return []byte{byte(p >> 8), byte(p)} }
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+		&expr.Range{Op: expr.CmpOpEq, Register: 1, FromData: be(r[0]), ToData: be(r[1])},
 	}
 }
 
