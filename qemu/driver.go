@@ -51,6 +51,8 @@ import (
 
 type hvf struct {
 	stateRoot string
+	// egress, when set, runs every guest as its own uid under an nftables allow-list (guest_egress.go).
+	egress *guestEgress
 	// Where neutral profile names resolve. Provider config, not claim content
 	// (ARCHITECTURE.md D12).
 	imageRoot string
@@ -270,6 +272,15 @@ func RootCmd() *cobra.Command {
 			d, err := newDriver()
 			if err != nil {
 				return err
+			}
+			// Fail closed: a controller asked to confine its guests and unable to must not run them.
+			if d.egress, err = guestEgressFromEnv(); err != nil {
+				return err
+			}
+			if d.egress != nil {
+				if err := d.egress.install(); err != nil {
+					return fmt.Errorf("guest egress: %w", err)
+				}
 			}
 			// NODE_NAME comes from the environment, never a flag. A flag is a compatibility
 			// contract in the wrong direction -- the reader must know the name, so a DaemonSet
@@ -1210,6 +1221,16 @@ func (h *hvf) create(m *unstructured.Unstructured, dir string) (int, error) {
 	}
 
 	cmd := exec.Command(p.QEMUBinary, args...)
+	if h.egress != nil {
+		if err := h.egress.own(dir); err != nil {
+			return 0, fmt.Errorf("guest egress: %w", err)
+		}
+		cred, err := h.egress.credential()
+		if err != nil {
+			return 0, fmt.Errorf("guest egress: %w", err)
+		}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("qemu: %v: %s", err, strings.TrimSpace(string(out)))
 	}

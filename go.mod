@@ -4,9 +4,13 @@ go 1.26.5
 
 require (
 	github.com/cosi-project/runtime v1.14.1
+	github.com/google/nftables v0.3.0
 	github.com/siderolabs/talos/pkg/machinery v1.13.7
 	github.com/spf13/cobra v1.10.2
+	github.com/vishvananda/netlink v1.3.1
+	github.com/vishvananda/netns v0.0.5
 	go.yaml.in/yaml/v4 v4.0.0-rc.4
+	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.81.0
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
@@ -80,7 +84,6 @@ require (
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
